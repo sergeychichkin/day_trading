@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qqq-opening-session-viewer"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = ["pandas-market-calendars>=5.6,<6", "tzdata"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "playwright>=1.50"]
+
+[tool.setuptools.packages.find]
+include = ["qqq_viewer*"]
+
+[tool.setuptools.package-data]
+qqq_viewer = ["static/*", "static/vendor/*"]
