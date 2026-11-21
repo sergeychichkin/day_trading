@@ -1,0 +1,43 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>QQQ · Regular Session</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script defer src="/static/vendor/lightweight-charts.js"></script>
+    <script defer src="/static/chart.js"></script>
+</head>
+<body>
+    <main>
+        <header class="toolbar">
+            <div class="instrument">
+                <h1>QQQ</h1>
+                <p>1 minute <span>·</span> Regular session <span>·</span> New York time</p>
+            </div>
+            <label class="month-picker" for="month">Month <input id="month" type="month" min="2020-01" disabled></label>
+        </header>
+        <section class="panel" aria-label="QQQ price and volume chart">
+            <div class="legend">
+                <div id="legend-time">—</div>
+                <dl>
+                    <div><dt>O</dt><dd id="legend-open">—</dd></div>
+                    <div><dt>H</dt><dd id="legend-high">—</dd></div>
+                    <div><dt>L</dt><dd id="legend-low">—</dd></div>
+                    <div><dt>C</dt><dd id="legend-close">—</dd></div>
+                    <div><dt>Volume<span id="unit"></span></dt><dd id="legend-volume">—</dd></div>
+                    <div class="sma"><dt>Volume SMA 20</dt><dd id="legend-sma">—</dd></div>
+                </dl>
+            </div>
+            <div class="chart-body">
+                <div id="chart"></div>
+                <div id="empty" hidden></div>
+            </div>
+            <footer>
+                <p id="coverage" role="status">Loading coverage…</p>
+                <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">Charts by TradingView</a>
+            </footer>
+        </section>
+    </main>
+</body>
+</html>
