@@ -1,4 +1,4 @@
-﻿import os
+import os
 from pathlib import Path
 
 import pytest
@@ -38,6 +38,12 @@ def test_opening_window_hover_and_horizontal_scroll(page, market_cache):
         expect(page.locator("#month")).to_have_value("2020-02")
         expect(page.locator("#coverage")).to_contain_text("390")
         expect(page.locator("#chart canvas").first).to_be_visible()
+        page.wait_for_function("""
+            () => {
+                const range = testChart.timeScale().getVisibleRange();
+                return range?.from === 1580740200 && range?.to === 1580747340;
+            }
+        """)
         initial = page.evaluate("testChart.timeScale().getVisibleRange()")
         assert initial["from"] == 1580740200
         assert initial["to"] == 1580747340
