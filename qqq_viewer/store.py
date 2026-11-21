@@ -1,4 +1,4 @@
-﻿import json
+import json
 import math
 import sqlite3
 from contextlib import closing, contextmanager
@@ -141,7 +141,7 @@ class Store:
                     "VALUES (?, ?, ?, ?, ?, ?, ?)", (attempt_id, *raw)
                 ).lastrowid
                 bar = Bar.from_raw(raw, session)
-                if bar is None:
+                if bar is None or attempt.status == "unit_unverified":
                     continue
                 previous = existing.get(bar.time)
                 if previous is None:
