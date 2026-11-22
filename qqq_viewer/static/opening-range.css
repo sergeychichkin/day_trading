@@ -1,0 +1,38 @@
+:root { color-scheme: dark; font: 14px/1.45 "Segoe UI", system-ui, sans-serif; color: #e4ecf7; background: #0b111b; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 1600px; margin: auto; padding: 22px; }
+header, section { margin-bottom: 16px; padding: 17px 20px; border: 1px solid #28364a; border-radius: 9px; background: #101824; }
+h1, h2, p { margin: 0 0 8px; }
+h1 { font-size: 26px; }
+h1 span { color: #8fceff; margin-left: 8px; }
+h2 { font-size: 17px; }
+p, footer { color: #9fb1c8; }
+#summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-block: 14px; }
+.card { border: 1px solid #2b384b; border-radius: 7px; padding: 10px 12px; color: #9fb1c8; }
+.card strong { display: block; color: #e4ecf7; font-size: 19px; margin-top: 3px; }
+.scroll { overflow: auto; }
+#trades { min-width: 1050px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 9px 11px; border-bottom: 1px solid #273347; text-align: right; white-space: nowrap; }
+th:nth-child(-n+2), td:nth-child(-n+2) { text-align: left; }
+th, .muted { color: #a9bad0; font-size: 12px; }
+#trades th, #trades tbody tr { cursor: pointer; }
+#trades tbody tr:hover, #trades tbody tr[aria-selected="true"] { background: #1c3046; }
+#trades tbody tr:focus-visible, #trades th:focus-visible { outline: 1px solid #70b9ee; }
+.toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+select { font: inherit; border: 1px solid #3c4c63; padding: 5px 9px; border-radius: 5px; background: #172335; color: inherit; }
+.key { display: flex; gap: 20px; flex-wrap: wrap; }
+.base, .positive { color: #58daba; }
+.stress { color: #c6a1fa; }
+.benchmark { color: #7eb8f1; }
+.negative { color: #ff8a8a; }
+.signal { color: #f1c375; }
+#equity { height: 230px; }
+#drawdown { height: 115px; }
+#price { height: 495px; }
+#chart-legend { min-height: 21px; font-variant-numeric: tabular-nums; }
+pre { overflow-wrap: anywhere; white-space: pre-wrap; }
+a { color: #acd1f5; }
+@media (max-width: 700px) { main { padding: 8px; } section, header { padding: 11px; } #price { height: 400px; } }
+#scenarios .active-scenario { background: #1c3046; }

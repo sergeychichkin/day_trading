@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>{{CSS}}</style>
+</head>
+<body>
+<main>
+<header>
+    <h1>Opening Range Backtest <span id="ticker"></span></h1>
+    <p id="parameters"></p>
+</header>
+<section aria-labelledby="summary-heading">
+    <div class="toolbar"><h2 id="summary-heading">Executive Performance Summary</h2><label>View <select id="run-select"></select></label></div>
+    <div id="summary"></div>
+    <div class="scroll">
+        <table id="scenarios">
+            <thead><tr><th>Scenario</th><th>Trades</th><th>Net PnL</th><th>Return</th><th>Max Drawdown</th><th>Comm</th><th>Slippage</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</section>
+<section aria-labelledby="equity-heading">
+    <h2 id="equity-heading">Equity and Drawdown</h2>
+    <p class="key"><span class="base" id="selected-equity">Strategy</span><span class="benchmark">Buy and hold, price only</span></p>
+    <div id="equity"></div>
+    <p class="muted">Closed balance drawdown</p>
+    <div id="drawdown"></div>
+</section>
+<section id="trade-chart" aria-labelledby="chart-heading">
+    <div class="toolbar"><h2 id="chart-heading">Price, VWAP and Trades</h2><label>Month <select id="month"></select></label></div>
+    <div class="toolbar"><p class="key"><span class="signal">Entry signal</span><span class="negative">Dashed initial stop</span></p><label>Inspect order <select id="order-select"></select></label></div>
+    <p id="chart-legend" aria-live="off"></p>
+    <div id="price"></div>
+    <p id="selected-trade" class="muted"></p>
+</section>
+<section aria-labelledby="trades-heading">
+    <div class="toolbar"><h2 id="trades-heading">Executed Trades Log</h2><label>Show <select id="filter"><option value="all">All trades</option><option value="wins">Winners</option><option value="losses">Losers</option></select></label></div>
+    <p class="muted">Select a trade row to zoom the chart to the session and fills. Click a column heading to sort.</p>
+    <div class="scroll">
+        <table id="trades">
+            <thead><tr><th>Number</th><th>Date</th><th>Entry Time</th><th>Entry Price</th><th>Exit Time</th><th>Exit Price</th><th>Shares</th><th>PnL</th><th>Comm</th><th>Slippage</th><th>ATR/Close %</th><th>MFE %</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</section>
+<section aria-labelledby="methods-heading">
+    <h2 id="methods-heading">Run Details</h2>
+    <p id="coverage"></p>
+    <p id="execution"></p>
+    <p>Entry 1 only uses the new replacement and re-entry rules. The archived 2020 baseline uses a single signal and trade per day.</p>
+    <p>Times are New York minute labels. Signal and stop updates use completed candles. ATR(20) uses one-minute true ranges and carries across regular sessions. Trade PnL already includes fill slippage and commissions. Slippage includes gaps through a stop trigger.</p>
+    <p>IBKR Pro Fixed broker commission is modeled at $0.005/share per order with a $1 minimum and 1% trade-value cap. Additional regulatory and venue fees are excluded. The buy-and-hold comparison uses unleveraged price change and excludes dividends and trading costs.</p>
+    <p>ATR/Close uses the previous completed session's Wilder daily ATR divided by that session's close. MFE measures the favorable price move from the entry fill and excludes unsequenced exit-minute highs. Daily ATR is blank during warmup.</p>
+    <details><summary>Settings and input fingerprint</summary><pre id="provenance"></pre></details>
+</section>
+<footer><a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">Charts by TradingView</a></footer>
+</main>
+<script id="report-data" type="application/json">{{PAYLOAD}}</script>
+<script>{{LIBRARY}}
+</script>
+<script>{{SCRIPT}}
+</script>
+</body>
+</html>
