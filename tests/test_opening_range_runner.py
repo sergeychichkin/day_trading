@@ -35,8 +35,10 @@ def test_scenarios_and_same_day_realized_equity(tmp_path):
     store.record_attempt(SESSION, Attempt("complete", [b.to_raw() for b in bars], request={"symbol": "QQQ"}))
     cfg = Settings(entry2=EntrySettings())
     payload = run("QQQ", store, cfg, SESSION.date, SESSION.date)
-    assert [case["id"] for case in payload["scenarios"]] == [
-        "entry1-base", "entry2-base", "both-base", "entry1-stress", "entry2-stress", "both-stress",
+    scenario_ids = ["entry1-base", "entry2-base", "both-base", "entry1-stress", "entry2-stress", "both-stress"]
+    assert [(case["id"], case["rule_version"], case["scenario_id"]) for case in payload["scenarios"]] == [
+        (f"{version}-{scenario}", version, scenario)
+        for version in ("legacy", "revised") for scenario in scenario_ids
     ]
     base = payload["scenarios"][0]
     assert len(base["trades"]) == 2
@@ -45,7 +47,12 @@ def test_scenarios_and_same_day_realized_equity(tmp_path):
     ]
     cfg = replace(cfg, entry1=replace(cfg.entry1, enabled=False))
     only_two = run("QQQ", store, cfg, SESSION.date, SESSION.date)
-    assert [case["id"] for case in only_two["scenarios"]] == ["entry2-base", "entry2-stress"]
+    assert [case["id"] for case in only_two["scenarios"]] == [
+        "legacy-entry2-base", "legacy-entry2-stress", "revised-entry2-base", "revised-entry2-stress",
+    ]
+    for case in only_two["scenarios"]:
+        assert case["equity"] == [{"time": SESSION.open_utc, "value": 100_000},
+                                  {"time": SESSION.close_utc, "value": 100_000}]
     assert stats([], [98_000, 101_000, 101_000], 100_000)["max_drawdown_pct"] == 2.0
 
 
@@ -54,10 +61,13 @@ def test_output_reserves_original_baseline(monkeypatch, tmp_path):
 
     monkeypatch.chdir(tmp_path)
     first, last = date(2020, 1, 1), date(2020, 12, 31)
-    assert output_path("QQQ", first, last, None).name == "QQQ_opening_range_entries_2020-01-01_2020-12-31.html"
+    assert output_path("QQQ", first, last, None).name == "QQQ_opening_range_rule_comparison_2020-01-01_2020-12-31.html"
     old = Path("output/QQQ_opening_range_2020-01-01_2020-12-31.html")
     with pytest.raises(ValueError, match="baseline"):
         output_path("QQQ", first, last, old)
+    old_comparison = Path("output/QQQ_opening_range_entries_2020-01-01_2020-12-31.html")
+    with pytest.raises(ValueError, match="previous comparison"):
+        output_path("QQQ", first, last, old_comparison)
 
 
 def test_protects_checkout_baseline_from_another_working_directory(monkeypatch, tmp_path):

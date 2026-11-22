@@ -64,10 +64,18 @@ def _same_path(first: Path, second: Path) -> bool:
 
 def output_path(ticker: str, start: date, end: date, explicit: Path | None,
                 *, cache: Path | None = None) -> Path:
-    path = explicit or Path("output") / f"{ticker}_opening_range_entries_{start}_{end}.html"
-    checkout_baseline = Path(__file__).resolve().parents[1] / LEGACY_BASELINE
-    if _same_path(path, LEGACY_BASELINE) or _same_path(path, checkout_baseline):
-        raise ValueError("The original 2020 report is reserved as the baseline. Choose another output path.")
+    path = explicit or Path("output") / f"{ticker}_opening_range_rule_comparison_{start}_{end}.html"
+    checkout = Path(__file__).resolve().parents[1]
+    previous_reports = {
+        LEGACY_BASELINE: "The original 2020 report is reserved as the baseline.",
+        Path("output/QQQ_opening_range_entries_2020-01-01_2020-12-31.html"):
+            "The previous comparison report is reserved.",
+        Path("output") / f"{ticker}_opening_range_entries_{start}_{end}.html":
+            "The previous comparison report is reserved.",
+    }
+    for previous, message in previous_reports.items():
+        if _same_path(path, previous) or _same_path(path, checkout / previous):
+            raise ValueError(f"{message} Choose another output path.")
     if cache is not None:
         protected = {base.with_name(base.name + suffix) for base in (cache, cache.resolve())
                      for suffix in ("", "-wal", "-shm", "-journal")}
@@ -88,8 +96,10 @@ def _scenarios(cfg: Settings) -> list[tuple[dict, Settings]]:
     if not modes:
         raise ValueError("At least one entry must be enabled.")
     return [
-        ({"id": f"{key}-{suffix}", "label": label, "entries": entries, "slippage_multiplier": multiplier,
+        ({"id": f"{version}-{key}-{suffix}", "scenario_id": f"{key}-{suffix}", "rule_version": version,
+          "label": label, "entries": entries, "slippage_multiplier": multiplier,
           "trades": [], "events": [], "equity": []}, settings)
+        for version in ("legacy", "revised")
         for suffix, multiplier in (("base", 1.0), ("stress", 2.0))
         for key, label, entries, settings in modes
     ]
@@ -201,7 +211,7 @@ def run(ticker: str, store: Store, settings: Settings, start: date, end: date) -
                         _append_balance(points, session.open_utc, cfg.starting_balance)
                     balance = points[-1]["value"]
                     result = replay_session(session, bars, atrs, balance, cfg, ratio, case["slippage_multiplier"],
-                                            vwaps=vwaps)
+                                            vwaps=vwaps, rule_version=case["rule_version"])
                     for trade in result.trades:
                         balance += trade.pnl
                         _append_balance(points, trade.exit_time, balance)
