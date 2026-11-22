@@ -215,7 +215,9 @@ function ridBands(days) {
         let current = null;
         let length = 0;
         for (const [time, , high, low, close] of day.bars) {
-            if (current && length < 25 && close < current.upper - 0.01 && close > current.lower + 0.01) {
+            // Allow for binary rounding at the strict one-cent boundary.
+            const tolerance = 0.01 + Math.abs(close) * Number.EPSILON;
+            if (current && length < 25 && close < current.upper - tolerance && close > current.lower + tolerance) {
                 current.last = time;
                 length += 1;
             } else {

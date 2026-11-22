@@ -47,7 +47,7 @@ The local cache covers January 2, 2020 at 09:30 through November 20, 2026 at 15:
 
 ## Opening-range backtest
 
-The command below compares Entry 1, Entry 2, and both entries for QQQ using the local one-minute cache. The replay permits sequential trades, with one open position at a time. Dates are inclusive and default to January 1 through December 31, 2020.
+The command below compares Legacy and Revised rules for Entry 1, Entry 2, and both entries for QQQ using the local one-minute cache. The replay permits sequential trades, with one open position at a time. Dates are inclusive and default to January 1 through December 31, 2020.
 
 ```powershell
 .\.venv\Scripts\python.exe -m qqq_viewer.backtest_opening_range
@@ -56,6 +56,8 @@ The command below compares Entry 1, Entry 2, and both entries for QQQ using the 
 
 Use a TOML file per ticker and point its cache setting to the corresponding regular-session SQLite cache. In [entry1] and [entry2], set enabled to false to run the other entry alone. Each table contains its own ATR offsets, minute lookbacks, and risk percentage. The [strategy] table holds shared exits, buying power, tick size, and slippage.
 
-With both entries enabled, the report includes six cases across the three entry combinations and two slippage assumptions. Select a case to view its equity, drawdown, order history, and trades. Select an order to inspect when it became active and when it was replaced, canceled, or filled. The signal marker shows the initial stop price, and the dashed segment marks the working window. Select a trade row to view its working window, fills, and active stop path. The current report opens from output/QQQ_opening_range_entries_2020-01-01_2020-12-31.html. The original report serves as the one-signal-per-day baseline.
+Open `output/QQQ_opening_range_rule_comparison_2020-01-01_2020-12-31.html` in a browser. With both entries enabled, each rule version has six cases across three entry combinations and two slippage assumptions. The report opens on Revised. Switching **Rules** keeps the selected case in **View**. The sortable **Entry** column shows the rule that placed the filled order. Use **RID [LazyBear]** to toggle the one-minute range bands. Select an order to inspect its working window, or select a trade to see its fills and active stop path.
+
+Revised Entry 2 accepts a bear candle or doji after four consecutive bullish candles. The signal or previous candle must have a high strictly above its own VWAP. For both entries, a bear candle entirely below VWAP starts a wait for the next bull candle. At that bull candle's close, the replay uses the preceding lows and configured ATR buffer to calculate a candidate stop, which applies starting on the next minute if it raises the active stop. A later bear candle can start another sequence.
 
 The replay verifies the ticker and session bounds for canonical bars and completion records. It requires complete, conflict-free sessions and uses earlier cached bars for indicator warmup only. The report records its input fingerprint and cost assumptions. Base and doubled-slippage scenarios include modeled IBKR Pro Fixed broker commissions. The additional regulatory and venue fees depend on the applicable schedule and routing and are excluded here.

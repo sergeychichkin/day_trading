@@ -178,6 +178,10 @@ def test_rid_resets_and_visibility_persists(tmp_path, page):
     ]
     assert segments[-2]["last"] == START + 209 * 60
     assert segments[-1] == dict(first=START + 86400, last=START + 86400 + 120, upper=110, lower=100)
+    assert page.evaluate("""() => [200.01, 200.02, 200.009].map((close, index) => {
+        const [high, low] = index === 1 ? [201, 200.01] : [200.02, 199];
+        return ridBands([{bars: [[0, low, high, low, low], [60, low, high, low, close]]}]).length;
+    })""") == [2, 2, 1]
     toggle.uncheck()
     page.locator("#rules-select").select_option("legacy")
     expect(toggle).not_to_be_checked()
