@@ -44,3 +44,18 @@ Charts use the locally bundled [TradingView Lightweight Charts](https://www.trad
 ## Verified initial backfill
 
 The local cache covers January 2, 2020 at 09:30 through November 20, 2026 at 15:59 New York time. It contains 673,320 one-minute bars across 1,732 regular sessions. The calendar audit found zero missing minutes and zero conflicting minutes. Repeating the backfill left the cache counts unchanged.
+
+## Opening-range backtest
+
+The command below compares Entry 1, Entry 2, and both entries for QQQ using the local one-minute cache. The replay permits sequential trades, with one open position at a time. Dates are inclusive and default to January 1 through December 31, 2020.
+
+```powershell
+.\.venv\Scripts\python.exe -m qqq_viewer.backtest_opening_range
+.\.venv\Scripts\python.exe -m qqq_viewer.backtest_opening_range --config config/QQQ.toml --start 2020-02-03 --end 2020-04-30
+```
+
+Use a TOML file per ticker and point its cache setting to the corresponding regular-session SQLite cache. In [entry1] and [entry2], set enabled to false to run the other entry alone. Each table contains its own ATR offsets, minute lookbacks, and risk percentage. The [strategy] table holds shared exits, buying power, tick size, and slippage.
+
+With both entries enabled, the report includes six cases across the three entry combinations and two slippage assumptions. Select a case to view its equity, drawdown, order history, and trades. Select an order to inspect its working window or select a trade row to view its stop path. The current report opens from output/QQQ_opening_range_entries_2020-01-01_2020-12-31.html. The original report serves as the one-signal-per-day baseline.
+
+The replay requires complete, conflict-free sessions and uses earlier cached bars for indicator warmup only. The report records its input fingerprint and cost assumptions. Base and doubled-slippage scenarios include modeled IBKR Pro Fixed broker commissions. The additional regulatory and venue fees depend on the applicable schedule and routing and are excluded here.
