@@ -13,7 +13,7 @@
     <p id="parameters"></p>
 </header>
 <section aria-labelledby="summary-heading">
-    <div class="toolbar"><h2 id="summary-heading">Executive Performance Summary</h2><label>View <select id="run-select"></select></label></div>
+    <div class="toolbar"><h2 id="summary-heading">Executive Performance Summary</h2><label>Rules <select id="rules-select"><option value="revised" selected>Revised</option><option value="legacy">Legacy</option></select></label><label>View <select id="run-select"></select></label></div>
     <div id="summary"></div>
     <div class="scroll">
         <table id="scenarios">
@@ -30,7 +30,7 @@
     <div id="drawdown"></div>
 </section>
 <section id="trade-chart" aria-labelledby="chart-heading">
-    <div class="toolbar"><h2 id="chart-heading">Price, VWAP and Trades</h2><label>Month <select id="month"></select></label></div>
+    <div class="toolbar"><h2 id="chart-heading">Price, VWAP and Trades</h2><label><input type="checkbox" id="toggle-rid" checked> RID [LazyBear]</label><label>Month <select id="month"></select></label></div>
     <div class="toolbar"><p class="key"><span class="signal">Entry signal</span><span class="negative">Dashed initial stop</span></p><label>Inspect order <select id="order-select"></select></label></div>
     <p id="chart-legend" aria-live="off"></p>
     <div id="price"></div>
@@ -41,7 +41,7 @@
     <p class="muted">Select a trade row to zoom the chart to the session and fills. Click a column heading to sort.</p>
     <div class="scroll">
         <table id="trades">
-            <thead><tr><th>Number</th><th>Date</th><th>Entry Time</th><th>Entry Price</th><th>Exit Time</th><th>Exit Price</th><th>Shares</th><th>PnL</th><th>Comm</th><th>Slippage</th><th>ATR/Close %</th><th>MFE %</th></tr></thead>
+            <thead><tr><th>Number</th><th>Date</th><th>Entry</th><th>Entry Time</th><th>Entry Price</th><th>Exit Time</th><th>Exit Price</th><th>Shares</th><th>PnL</th><th>Comm</th><th>Slippage</th><th>ATR/Close %</th><th>MFE %</th></tr></thead>
             <tbody></tbody>
         </table>
     </div>
@@ -50,7 +50,7 @@
     <h2 id="methods-heading">Run Details</h2>
     <p id="coverage"></p>
     <p id="execution"></p>
-    <p>Entry 1 only uses the new replacement and re-entry rules. The archived 2020 baseline uses a single signal and trade per day.</p>
+    <p>Legacy uses the previous two-entry rules. Revised adds the Entry 2 doji and VWAP conditions and waits for a bullish candle before moving the stop. Both versions support order replacement and sequential trades.</p>
     <p>Times are New York minute labels. Signal and stop updates use completed candles. ATR(20) uses one-minute true ranges and carries across regular sessions. Trade PnL already includes fill slippage and commissions. Slippage includes gaps through a stop trigger.</p>
     <p>IBKR Pro Fixed broker commission is modeled at $0.005/share per order with a $1 minimum and 1% trade-value cap. Additional regulatory and venue fees are excluded. The buy-and-hold comparison uses unleveraged price change and excludes dividends and trading costs.</p>
     <p>ATR/Close uses the previous completed session's Wilder daily ATR divided by that session's close. MFE measures the favorable price move from the entry fill and excludes unsequenced exit-minute highs. Daily ATR is blank during warmup.</p>

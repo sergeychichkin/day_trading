@@ -48,12 +48,25 @@ def report_fixture(path: Path, *, tick_size=.01) -> None:
     stress = base | dict(id="both-stress", slippage_multiplier=2, trades=trades[:1], events=events[:3],
                          equity=initial + [{"time": stamp(20), "value": 100008}],
                          stats=base["stats"] | {"trades": 1, "ending_balance": 100008})
+    legacy_stress = stress | dict(trades=[], events=[], equity=initial,
+                                  stats=stress["stats"] | {"trades": 0, "ending_balance": 100000})
+    scenarios = [case | dict(id=f"{version}-{case['id']}", scenario_id=case["id"], rule_version=version)
+                 for version, cases in (("legacy", [base, legacy_stress]), ("revised", [base, stress]))
+                 for case in cases]
+    bars = [[stamp(i), 105, 110, 100, 105, 1000, 105] for i in range(210)]
+    bars[26] = [stamp(26), 105, 111, 102, 109.99, 1000, 105]
+    feb = START + 32 * 86400
     write_report(path, dict(
         ticker="QQQ", start=DATE, end=DATE, settings=dict(starting_balance=100_000, risk_pct=.25,
         leverage=4, slippage_bps=1, slippage_floor=.01, tick_size=tick_size), benchmark=initial, benchmark_pct=0,
-        bars=210, input_bars=210, input_sha256="fixture", sessions=1, scenarios=[base, stress],
-        months={"2020-01": [dict(date=DATE, close=stamp(210), range_high=110, range_low=100,
-                                 bars=[[stamp(i), 105, 110, 100, 105, 1000, 105] for i in range(210)])]},
+        bars=216, input_bars=216, input_sha256="fixture", sessions=3, scenarios=scenarios,
+        months={
+            "2020-01": [dict(date=DATE, close=stamp(210), range_high=110, range_low=100, bars=bars),
+                        dict(date="2020-01-03", close=START + 86400 + 180, range_high=110, range_low=100,
+                             bars=[[START + 86400 + i * 60, 105, 110, 100, 105, 1000, 105] for i in range(3)])],
+            "2020-02": [dict(date="2020-02-03", close=feb + 180, range_high=110, range_low=100,
+                             bars=[[feb + i * 60, 105, 110, 100, 105, 1000, 105] for i in range(3)])],
+        },
     ))
 
 
@@ -65,7 +78,7 @@ def test_report_selects_distinct_same_day_trades_and_order_windows(tmp_path, pag
     page.goto(path.as_uri())
     expect(page.locator("#run-select")).to_have_value("both-base")
     assert page.locator("#trades th").all_text_contents() == [
-        "Number", "Date", "Entry Time", "Entry Price", "Exit Time", "Exit Price",
+        "Number", "Date", "Entry", "Entry Time", "Entry Price", "Exit Time", "Exit Price",
         "Shares", "PnL", "Comm", "Slippage", "ATR/Close %", "MFE %",
     ]
     rows = page.locator("#trades tbody tr")
@@ -114,3 +127,62 @@ def test_report_keeps_subcent_order_triggers_distinct(tmp_path, page):
     assert page.evaluate("candles.options().priceFormat.minMove") == .001
     assert page.evaluate("candles.options().priceFormat.precision") == 3
     assert page.evaluate("orderPrice(100.004) !== orderPrice(100.003)")
+
+
+def test_rule_switch_keeps_scenario_and_month_and_refreshes_views(tmp_path, page):
+    path = tmp_path / "rules.html"
+    report_fixture(path)
+    page.goto(path.as_uri())
+    rules = page.locator("#rules-select")
+    expect(rules).to_have_value("revised")
+    rows = page.locator("#trades tbody tr")
+    entry = page.get_by_role("columnheader", name="Entry", exact=True)
+    entry.click()
+    assert page.locator("#trades tbody td:nth-child(3)").all_text_contents() == ["1", "2"]
+    entry.click()
+    assert page.locator("#trades tbody td:nth-child(3)").all_text_contents() == ["2", "1"]
+    expect(rows.first.locator("td").nth(8)).to_have_class("positive")
+    page.locator("#run-select").select_option("both-stress")
+    expect(page.locator("#order-select option")).to_have_count(3)
+    page.locator("#month").select_option("2020-02")
+    rules.select_option("legacy")
+    expect(page.locator("#month")).to_have_value("2020-02")
+    expect(page.locator("#run-select")).to_have_value("both-stress")
+    expect(page.locator("#summary")).to_contain_text("$100,000.00")
+    expect(rows.first.locator("td")).to_have_attribute("colspan", "13")
+    assert page.evaluate("equityLine.data().at(-1).value") == 100000
+    page.locator("#month").select_option("2020-01")
+    expect(page.locator("#order-select option")).to_have_count(1)
+
+
+def test_rid_resets_and_visibility_persists(tmp_path, page):
+    path = tmp_path / "rid.html"
+    report_fixture(path)
+    page.goto(path.as_uri())
+    toggle = page.get_by_role("checkbox", name="RID [LazyBear]")
+    expect(toggle).to_be_checked()
+    gray_band_visible = """() => {
+        const canvas = price.takeScreenshot();
+        const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+        for (let i = 0; i < pixels.length; i += 4) {
+            if (pixels[i] === 144 && pixels[i + 1] === 164 && pixels[i + 2] === 174) return true;
+        }
+        return false;
+    }"""
+    page.wait_for_function(gray_band_visible)
+    segments = page.evaluate("ridSegments")
+    assert segments[:3] == [
+        dict(first=START, last=START + 24 * 60, upper=110, lower=100),
+        dict(first=START + 25 * 60, last=START + 25 * 60, upper=110, lower=100),
+        dict(first=START + 26 * 60, last=START + 50 * 60, upper=111, lower=102),
+    ]
+    assert segments[-2]["last"] == START + 209 * 60
+    assert segments[-1] == dict(first=START + 86400, last=START + 86400 + 120, upper=110, lower=100)
+    toggle.uncheck()
+    page.locator("#rules-select").select_option("legacy")
+    expect(toggle).not_to_be_checked()
+    assert page.evaluate("ridSegments") == segments
+    page.wait_for_function(f"() => !({gray_band_visible})()")
+    toggle.check()
+    expect(toggle).to_be_checked()
+    page.wait_for_function(gray_band_visible)

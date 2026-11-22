@@ -29,8 +29,9 @@ const byId = id => document.getElementById(id);
 
 const entryLabel = id => id === "entry1" ? "Entry 1" : "Entry 2";
 const keyOf = (date, id) => date + ":" + id;
+const rulesSelect = byId("rules-select");
 const runSelect = byId("run-select");
-let selected = run.scenarios.find(item => item.id === "both-base") ?? run.scenarios[0];
+let selected;
 const caseLabel = item => item.label + (item.slippage_multiplier === 1 ? " · Base" : " · 2× slippage");
 
 byId("ticker").textContent = run.ticker;
@@ -38,17 +39,24 @@ byId("parameters").textContent = [
     run.start + " to " + run.end, money(cfg.starting_balance) + " starting balance",
     cfg.leverage + "× buying power", "New York time",
 ].join(" · ");
-for (const item of run.scenarios) {
-    runSelect.add(new Option(caseLabel(item), item.id));
-    const stat = item.stats;
-    const row = byId("scenarios").tBodies[0].insertRow();
-    for (const value of [caseLabel(item), stat.trades, money(stat.net), pct(stat.return_pct),
-        pct(stat.max_drawdown_pct), money(stat.commission), money(stat.slippage)]) {
-        row.insertCell().textContent = value;
+function showScenarios(preferredScenario) {
+    const scenarios = run.scenarios.filter(item => item.rule_version === rulesSelect.value);
+    const body = byId("scenarios").tBodies[0];
+    runSelect.replaceChildren();
+    body.replaceChildren();
+    for (const item of scenarios) {
+        runSelect.add(new Option(caseLabel(item), item.scenario_id));
+        const stat = item.stats;
+        const row = body.insertRow();
+        for (const value of [caseLabel(item), stat.trades, money(stat.net), pct(stat.return_pct),
+            pct(stat.max_drawdown_pct), money(stat.commission), money(stat.slippage)]) {
+            row.insertCell().textContent = value;
+        }
+        row.dataset.run = item.id;
     }
-    row.dataset.run = item.id;
+    const initial = scenarios.find(item => item.scenario_id === preferredScenario) ?? scenarios[0];
+    runSelect.value = initial.scenario_id;
 }
-runSelect.value = selected.id;
 
 function showSummary() {
     const stat = selected.stats;
@@ -83,7 +91,8 @@ function showSummary() {
     ].join(" · ");
     byId("provenance").textContent = JSON.stringify({
         ticker: run.ticker, start: run.start, end: run.end, settings: cfg,
-        run: selected.id, warmup_inclusive_bars: run.input_bars, canonical_bars_sha256: run.input_sha256,
+        run: selected.id, rule_version: selected.rule_version, scenario: selected.scenario_id,
+        warmup_inclusive_bars: run.input_bars, canonical_bars_sha256: run.input_sha256,
     }, null, 2);
 }
 
@@ -149,6 +158,8 @@ const volume = price.addHistogramSeries({
 price.priceScale("vol").applyOptions({scaleMargins: {top: 0.8, bottom: 0.02}});
 const month = byId("month");
 const orderSelect = byId("order-select");
+const toggleRid = byId("toggle-rid");
+let ridSegments = [], requestRidUpdate;
 let orderWindows = new Map(), ordersByDate = new Map(), tradesByKey = new Map();
 
 function indexSelectedRun() {
@@ -197,6 +208,58 @@ candles.attachPrimitive({
         }}),
     }],
 });
+
+function ridBands(days) {
+    const segments = [];
+    for (const day of days) {
+        let current = null;
+        let length = 0;
+        for (const [time, , high, low, close] of day.bars) {
+            if (current && length < 25 && close < current.upper - 0.01 && close > current.lower + 0.01) {
+                current.last = time;
+                length += 1;
+            } else {
+                current = {first: time, last: time, upper: high, lower: low};
+                segments.push(current);
+                length = 1;
+            }
+        }
+    }
+    return segments;
+}
+
+candles.attachPrimitive({
+    attached({requestUpdate}) { requestRidUpdate = requestUpdate; },
+    paneViews: () => [{
+        zOrder: () => "bottom",
+        renderer: () => ({draw(target) {
+            if (!toggleRid.checked) return;
+            target.useMediaCoordinateSpace(({context, mediaSize}) => {
+                context.save();
+                context.strokeStyle = "#90a4ae";
+                context.lineWidth = 2;
+                context.beginPath();
+                const scale = price.timeScale();
+                for (const {first, last, upper, lower} of ridSegments) {
+                    const start = scale.timeToCoordinate(first);
+                    const end = scale.timeToCoordinate(last);
+                    if (start === null || end === null || end < 0 || start > mediaSize.width) continue;
+                    for (const bound of [upper, lower]) {
+                        const y = candles.priceToCoordinate(bound);
+                        if (y === null) continue;
+                        const padding = first === last ? 1 : 0;
+                        context.moveTo(start - padding, y);
+                        context.lineTo(end + padding, y);
+                    }
+                }
+                context.stroke();
+                context.restore();
+            });
+        }}),
+    }],
+});
+toggleRid.addEventListener("change", () => requestRidUpdate());
+
 for (const key of Object.keys(run.months)) {
     month.add(new Option(key, key));
 }
@@ -227,6 +290,7 @@ function showMonth(key) {
     signalStops = new Map();
     orderSelect.replaceChildren(new Option("Select an order", ""));
     const days = run.months[key];
+    ridSegments = ridBands(days);
     opens = days.map(day => day.bars[0][0]);
     const bars = [], vols = [], markers = [];
     for (const day of days) {
@@ -280,7 +344,7 @@ month.addEventListener("change", () => {
 });
 const table = byId("trades");
 const filter = byId("filter");
-const fields = ["number", "date", "entry_time", "entry_price", "exit_time", "exit_price", "shares", "pnl",
+const fields = ["number", "date", "entry_type", "entry_time", "entry_price", "exit_time", "exit_price", "shares", "pnl",
     "commission", "slippage", "atr_close_pct", "mfe_pct"];
 let sortColumn = 0;
 let direction = 1;
@@ -338,12 +402,12 @@ function renderTrades() {
         const row = body.insertRow();
         row.dataset.order = keyOf(t.date, t.order_id);
         row.tabIndex = 0;
-        for (const value of [t.number, t.date, time(t.entry_time), fillPrice.format(t.entry_price),
+        for (const value of [t.number, t.date, t.entry_type === "entry1" ? "1" : "2", time(t.entry_time), fillPrice.format(t.entry_price),
             time(t.exit_time), fillPrice.format(t.exit_price), formatCount.format(t.shares), money(t.pnl),
             money(t.commission), money(t.slippage), pct(t.atr_close_pct), pct(t.mfe_pct)]) {
             row.insertCell().textContent = value;
         }
-        row.cells[7].className = t.pnl >= 0 ? "positive" : "negative";
+        row.cells[fields.indexOf("pnl")].className = t.pnl >= 0 ? "positive" : "negative";
         row.addEventListener("click", () => selectTrade(t, row));
         row.addEventListener("keydown", event => {
             if (event.key === "Enter") selectTrade(t, row);
@@ -397,6 +461,7 @@ orderSelect.addEventListener("change", () => {
         time(order.time) + "–" + time(order.end ?? day.close) + " · " + order.status;
 });
 function showRun() {
+    selected = run.scenarios.find(item => item.scenario_id === runSelect.value && item.rule_version === rulesSelect.value);
     indexSelectedRun();
     showSummary();
     showEquity();
@@ -404,8 +469,13 @@ function showRun() {
     renderTrades();
 }
 runSelect.addEventListener("change", () => {
-    selected = run.scenarios.find(item => item.id === runSelect.value);
     filter.value = "all";
     showRun();
 });
+rulesSelect.addEventListener("change", () => {
+    showScenarios(runSelect.value);
+    filter.value = "all";
+    showRun();
+});
+showScenarios("both-base");
 showRun();
