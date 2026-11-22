@@ -40,3 +40,7 @@ Open [the local QQQ viewer](http://127.0.0.1:8765/). The viewer can run as the b
 ```
 
 Charts use the locally bundled [TradingView Lightweight Charts](https://www.tradingview.com/lightweight-charts/) 4.1.1.
+
+## Verified initial backfill
+
+The local cache covers January 2, 2020 at 09:30 through November 20, 2026 at 15:59 New York time. It contains 673,320 one-minute bars across 1,732 regular sessions. The calendar audit found zero missing minutes and zero conflicting minutes. Repeating the backfill left the cache counts unchanged.
