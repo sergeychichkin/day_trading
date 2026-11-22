@@ -9,7 +9,7 @@ DATE = "2020-01-02"
 START = 1577975400
 
 
-def report_fixture(path: Path) -> None:
+def report_fixture(path: Path, *, tick_size=.01) -> None:
     def stamp(i):
         return START + i * 60
 
@@ -34,6 +34,9 @@ def report_fixture(path: Path) -> None:
         event("placed", 4, 41, 40, "entry1", 104),
         event("canceled", 4, 150, 40, "entry1", 104),
     ]
+    if tick_size < .01:
+        events[0]["entry_trigger"] = 100.004
+        events[1]["entry_trigger"] = 100.003
     trades = [trade(2, 15, 17, 20, "entry1", 102), trade(3, 25, 27, 30, "entry2", 103)]
     initial = [{"time": START, "value": 100_000}]
     base = dict(id="both-base", label="Both entries", entries=["entry1", "entry2"],
@@ -47,7 +50,7 @@ def report_fixture(path: Path) -> None:
                          stats=base["stats"] | {"trades": 1, "ending_balance": 100008})
     write_report(path, dict(
         ticker="QQQ", start=DATE, end=DATE, settings=dict(starting_balance=100_000, risk_pct=.25,
-        leverage=4, slippage_bps=1, slippage_floor=.01), benchmark=initial, benchmark_pct=0,
+        leverage=4, slippage_bps=1, slippage_floor=.01, tick_size=tick_size), benchmark=initial, benchmark_pct=0,
         bars=210, input_bars=210, input_sha256="fixture", sessions=1, scenarios=[base, stress],
         months={"2020-01": [dict(date=DATE, close=stamp(210), range_high=110, range_low=100,
                                  bars=[[stamp(i), 105, 110, 100, 105, 1000, 105] for i in range(210)])]},
@@ -71,6 +74,17 @@ def test_report_selects_distinct_same_day_trades_and_order_windows(tmp_path, pag
     expect(page.locator("#selected-trade")).to_contain_text("$102.00")
     expect(page.locator("#selected-trade")).to_contain_text("Buy 09:47 at $106.0000")
     assert page.evaluate("stopLine.data().map(p => p.value)") == [102, 102]
+    expect(page.locator("#selected-trade")).to_contain_text("Working 09:46–09:47")
+    assert page.evaluate("""() => {
+        const windows = [equity, drawdown].map(chart => chart.options().localization.timeFormatter);
+        return windows.every(format => format(1577976600).includes("09:50")
+                                      && format(1577977200).includes("10:00"));
+    }""")
+    assert page.evaluate("""() => overlays.some(line => {
+        const points = line.data();
+        return line.options().title === "Initial stop" && points[0].value === 102
+            && points[0].time === 1577976360 && points.at(-1).time === 1577976420;
+    })""")
     assert page.evaluate("rangeLines.map(series => series.data()[0].time)") == [START + 900] * 2
     rows.nth(1).click()
     expect(page.locator("#selected-trade")).to_contain_text("Entry 2")
@@ -88,3 +102,15 @@ def test_report_selects_distinct_same_day_trades_and_order_windows(tmp_path, pag
     expect(page.locator("#summary")).to_contain_text("$100,008.00")
     assert page.evaluate("equityLine.data().at(-1).value") == 100008
     assert not errors
+
+
+
+def test_report_keeps_subcent_order_triggers_distinct(tmp_path, page):
+    path = tmp_path / "subcent.html"
+    report_fixture(path, tick_size=.001)
+    page.goto(path.as_uri())
+    page.locator("#order-select").select_option(f"{DATE}:1")
+    expect(page.locator("#selected-trade")).to_contain_text("Buy stop $100.004")
+    assert page.evaluate("candles.options().priceFormat.minMove") == .001
+    assert page.evaluate("candles.options().priceFormat.precision") == 3
+    assert page.evaluate("orderPrice(100.004) !== orderPrice(100.003)")

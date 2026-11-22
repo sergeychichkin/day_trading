@@ -4,8 +4,16 @@ const run = JSON.parse(document.querySelector("#report-data").textContent);
 const cfg = run.settings;
 const formatMoney = new Intl.NumberFormat("en-US", {style: "currency", currency: "USD"});
 const formatCount = new Intl.NumberFormat("en-US");
+const [tickMantissa, tickExponent = "0"] = cfg.tick_size.toString().split("e");
+const tickFraction = tickMantissa.split(".")[1] ?? "";
+const pricePrecision = Math.max(2, tickFraction.length - Number(tickExponent));
+const priceFormat = {type: "price", minMove: cfg.tick_size, precision: pricePrecision};
+const priceCurrency = new Intl.NumberFormat("en-US", {
+    style: "currency", currency: "USD", minimumFractionDigits: pricePrecision, maximumFractionDigits: pricePrecision,
+});
+const fillPrecision = Math.max(4, pricePrecision);
 const fillPrice = new Intl.NumberFormat("en-US", {
-    style: "currency", currency: "USD", minimumFractionDigits: 4, maximumFractionDigits: 4,
+    style: "currency", currency: "USD", minimumFractionDigits: fillPrecision, maximumFractionDigits: fillPrecision,
 });
 const formatTime = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
@@ -15,6 +23,7 @@ const formatDate = new Intl.DateTimeFormat("en-US", {
 });
 const time = t => formatTime.format(t * 1000);
 const money = n => n == null ? "—" : formatMoney.format(n);
+const orderPrice = n => n == null ? "—" : priceCurrency.format(n);
 const pct = n => n == null ? "—" : n.toFixed(2) + "%";
 const byId = id => document.getElementById(id);
 
@@ -83,7 +92,18 @@ const grid = {vertLines: {visible: false}, horzLines: {color: "#223046"}};
 const common = {autoSize: true, layout, grid, rightPriceScale: {borderColor: "#2e3f58"},
     timeScale: {borderColor: "#2e3f58"}};
 const library = LightweightCharts;
-const equity = library.createChart(byId("equity"), common);
+const performanceTime = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", year: "numeric", month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+const performanceOptions = {
+    ...common,
+    localization: {timeFormatter: stamp => performanceTime.format(stamp * 1000)},
+    timeScale: {...common.timeScale, timeVisible: true, secondsVisible: false,
+        tickMarkFormatter: (stamp, kind) => kind >= library.TickMarkType.Time
+            ? time(stamp) : formatDate.format(stamp * 1000)},
+};
+const equity = library.createChart(byId("equity"), performanceOptions);
 function addLine(chart, data, options) {
     const line = chart.addLineSeries({
         priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...options,
@@ -93,7 +113,7 @@ function addLine(chart, data, options) {
 }
 const equityLine = addLine(equity, [], {color: "#58daba", lineWidth: 2, lineType: library.LineType.WithSteps});
 addLine(equity, run.benchmark, {color: "#7eb8f1", lineWidth: 1});
-const drawdown = library.createChart(byId("drawdown"), common);
+const drawdown = library.createChart(byId("drawdown"), performanceOptions);
 const drawdownLine = addLine(drawdown, [], {color: "#ff8a8a", lineWidth: 2,
     lineType: library.LineType.WithSteps, priceFormat: {type: "percent"}});
 
@@ -118,6 +138,7 @@ const price = library.createChart(byId("price"), {
     localization: {timeFormatter: t => formatDate.format(t * 1000) + " " + time(t)},
 });
 const candles = price.addCandlestickSeries({
+    priceFormat,
     upColor: "#10b981", downColor: "#ef4444", borderVisible: false,
     wickUpColor: "#10b981", wickDownColor: "#ef4444",
     lastValueVisible: false, priceLineVisible: false,
@@ -184,9 +205,9 @@ price.subscribeCrosshairMove(({time: stamp}) => {
     if (!bar) return;
     byId("chart-legend").textContent = [
         formatDate.format(stamp * 1000) + " " + time(stamp),
-        "O " + money(bar[1]), "H " + money(bar[2]), "L " + money(bar[3]), "C " + money(bar[4]),
-        "Vol " + formatCount.format(bar[5]), "VWAP est. " + money(bar[6]),
-        ...(signalStops.has(stamp) ? ["Signal", "Initial stop " + money(signalStops.get(stamp))] : []),
+        "O " + orderPrice(bar[1]), "H " + orderPrice(bar[2]), "L " + orderPrice(bar[3]), "C " + orderPrice(bar[4]),
+        "Vol " + formatCount.format(bar[5]), "VWAP est. " + orderPrice(bar[6]),
+        ...(signalStops.has(stamp) ? ["Signal", "Initial stop " + orderPrice(signalStops.get(stamp))] : []),
     ].join(" · ");
 });
 function clearTradeOverlays() {
@@ -227,11 +248,14 @@ function showMonth(key) {
                 label + " · " + order.status, order.key));
             signalStops.set(order.signal_time, order.initial_stop);
             markers.push({time: order.signal_time, position: "aboveBar", color: "#f1c375", shape: "circle",
-                text: label + " · SL " + money(order.initial_stop)});
-            overlays.push(addLine(price, [
-                {time: order.signal_time, value: order.initial_stop},
-                {time: end, value: order.initial_stop},
-            ], {title: "Initial stop", color: "#ff8a8a", lineWidth: 1, lineStyle: library.LineStyle.Dashed}));
+                text: label + " · SL " + orderPrice(order.initial_stop)});
+            const active = Math.min(last, order.time);
+            const segment = [{time: active, value: order.initial_stop}];
+            if (end > active) segment.push({time: end, value: order.initial_stop});
+            overlays.push(addLine(price, segment, {
+                title: "Initial stop", color: "#ff8a8a", lineWidth: 1, priceFormat,
+                lineStyle: library.LineStyle.Dashed, pointMarkersVisible: segment.length === 1,
+            }));
             if (trade) {
                 markers.push(
                     {time: trade.entry_time, position: "belowBar", color: "#58daba", shape: "arrowUp", text: "Buy"},
@@ -285,9 +309,11 @@ function selectTrade(t, row) {
         color: "#ff8a8a", lineWidth: 2, lineType: library.LineType.WithSteps,
     });
     const exitLabels = {time: "13:00 exit", stop: "Protective stop", early_close: "Early-close liquidation"};
-    orderSelect.value = keyOf(t.date, t.order_id);
+    const selectedOrder = orderWindows.get(keyOf(t.date, t.order_id));
+    orderSelect.value = selectedOrder.key;
     byId("selected-trade").textContent = "Trade " + t.number + " · " + t.date + " · " + entryLabel(t.entry_type) + " · Signal " +
-        time(t.signal_time) + " · Initial stop " + money(t.initial_stop) +
+        time(t.signal_time) + " · Initial stop " + orderPrice(t.initial_stop) +
+        " · Working " + time(selectedOrder.time) + "–" + time(selectedOrder.end) +
         " · Buy " + time(t.entry_time) + " at " + fillPrice.format(t.entry_price) +
         " · Exit " + time(t.exit_time) + " at " + fillPrice.format(t.exit_price) +
         " · " + exitLabels[t.exit_reason] + " · " + t.stop_updates.length +
@@ -366,8 +392,8 @@ orderSelect.addEventListener("change", () => {
     price.timeScale().setVisibleRange({from: Math.max(day.bars[0][0], order.signal_time - 300),
         to: Math.min(last, (order.end ?? day.close) + 300)});
     byId("selected-trade").textContent = entryLabel(order.entry_type) + " · " + order.date + " · Signal " +
-        time(order.signal_time) + " · Buy stop " + money(order.entry_trigger) +
-        " · Initial stop " + money(order.initial_stop) + " · " +
+        time(order.signal_time) + " · Buy stop " + orderPrice(order.entry_trigger) +
+        " · Initial stop " + orderPrice(order.initial_stop) + " · " +
         time(order.time) + "–" + time(order.end ?? day.close) + " · " + order.status;
 });
 function showRun() {

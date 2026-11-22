@@ -151,3 +151,45 @@ def test_gap_with_zero_affordable_shares_clears_order():
     assert [e.action for e in result.events] == ["placed", "skipped", "skipped", "placed", "canceled"]
     assert result.events[1].reason == "fill_buying_power"
     assert result.events[2].signal_time == bars[16].time
+
+
+def test_entry_risk_floors_exact_tick_distance():
+    bars = [Bar(t, 229.70, 229.79, 229.67, 229.70, 1000) for t in SESSION.minutes]
+    bars[15] = Bar(bars[15].time, 229.85, 229.97, 229.80, 229.90, 1000)
+    result = replay_session(SESSION, bars, [.2] * len(bars), 100_000, CFG, None, 1)
+    order = result.events[0]
+    assert (order.entry_trigger, order.initial_stop, order.shares) == (230.02, 229.62, 625)
+
+
+@pytest.mark.parametrize("multiplier", [1, 2])
+def test_nonpositive_modeled_exit_is_rejected(multiplier):
+    from dataclasses import replace
+
+    bars = day({15: (101, 103, 101, 102), 16: (102, 105, 96, 102)})
+    cfg = replace(CFG, slippage_floor=100 / multiplier)
+    with pytest.raises(ValueError, match="nonpositive.*exit"):
+        replay_session(SESSION, bars, [2.] * len(bars), 100_000, cfg, None, multiplier)
+
+
+@pytest.mark.parametrize("trigger_index", [149, 150])
+def test_entry2_existing_order_can_fill_at_1159_but_not_noon(trigger_index):
+    bars = day({**{i: (99, 100, 98, 99.5) for i in range(140, 144)},
+                144: (100, 102, 99, 99.5), trigger_index: (102, 104, 101, 103)})
+    result = replay(bars, entry1=False)
+    if trigger_index == 149:
+        assert result.trades[0].entry_time == bars[149].time
+        assert result.events[1].action == "filled"
+    else:
+        assert not result.trades
+        assert result.events[1].action == "canceled"
+        assert result.events[1].time == bars[150].time
+
+
+def test_entry2_1159_signal_has_no_active_window():
+    bars = day({**{i: (99, 100, 98, 99.5) for i in range(145, 149)},
+                149: (100, 102, 99, 99.5), 150: (105, 106, 104, 105)})
+    result = replay(bars, entry1=False)
+    assert not result.trades
+    assert [(e.action, e.entry_type, e.reason, e.time) for e in result.events] == [
+        ("skipped", "entry2", "no_active_window", bars[150].time),
+    ]

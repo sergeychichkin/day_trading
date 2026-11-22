@@ -78,3 +78,48 @@ def test_rejects_input_cache_as_report_destination(tmp_path):
     with pytest.raises(ValueError, match="input cache"):
         output_path("QQQ", first, last, cache, cache=cache)
     assert cache.read_bytes() == b"fixture"
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_protects_sqlite_sidecars_as_report_destinations(tmp_path, suffix):
+    from qqq_viewer.backtest_opening_range import output_path
+
+    cache = tmp_path / "input.sqlite3"
+    dest = cache.with_name(cache.name + suffix)
+    with pytest.raises(ValueError, match="input cache"):
+        output_path("QQQ", SESSION.date, SESSION.date, dest, cache=cache)
+    assert not dest.exists()
+
+
+def test_protects_hardlink_to_sqlite_sidecar(tmp_path):
+    from qqq_viewer.backtest_opening_range import output_path
+
+    cache = tmp_path / "input.sqlite3"
+    sidecar = cache.with_name(cache.name + "-wal")
+    sidecar.write_bytes(b"fixture")
+    alias = tmp_path / "alias.html"
+    alias.hardlink_to(sidecar)
+    with pytest.raises(ValueError, match="input cache"):
+        output_path("QQQ", SESSION.date, SESSION.date, alias, cache=cache)
+    assert sidecar.read_bytes() == b"fixture"
+
+
+@pytest.mark.parametrize("origin_request,completion_bounds,message", [
+    ({}, "correct", "source"),
+    ({"symbol": "QQQ"}, "shifted", "completion"),
+    ({"symbol": "QQQ"}, "incorrect_ticker", "completion"),
+])
+def test_rejects_unverified_canonical_sources_and_completion(tmp_path, origin_request, completion_bounds, message):
+    from qqq_viewer.sessions import Session
+
+    store = Store(tmp_path / "cache.sqlite3")
+    store.record_attempt(SESSION, Attempt("timeout", [b.to_raw() for b in day({})], request=origin_request))
+    completion = SESSION
+    request = {"symbol": "QQQ"}
+    if completion_bounds == "shifted":
+        completion = Session(SESSION.date, SESSION.open_utc + 60, SESSION.close_utc)
+    if completion_bounds == "incorrect_ticker":
+        request = {}
+    store.record_attempt(completion, Attempt("complete", [], request=request))
+    with pytest.raises(ValueError, match=message):
+        run("QQQ", store, Settings(), SESSION.date, SESSION.date)

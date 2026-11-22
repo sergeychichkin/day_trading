@@ -2,7 +2,8 @@
 
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
-from math import ceil, floor
+from fractions import Fraction
+from math import ceil, floor, isfinite
 
 from .sessions import Session
 from .store import Bar
@@ -153,6 +154,9 @@ class Position:
               daily_ratio: float | None, multiplier: float, *, ambiguous: bool = False) -> Trade:
         sell_slip = slip(reference, cfg, multiplier)
         exit_price = reference - sell_slip
+        if not isfinite(exit_price) or exit_price <= 0:
+            raise ValueError(f"Invalid or nonpositive modeled exit price {exit_price:g} at epoch {time}. "
+                             "Check the slippage settings.")
         fees = commission(self.shares, self.entry_price) + commission(self.shares, exit_price)
         exit_gap = self.stop - reference if reason == "stop" else 0.0
         gap_cost = (self.entry_ref - self.order.trigger + exit_gap) * self.shares
@@ -197,7 +201,11 @@ def replay_session(
             order, working = working, None
             reference = max(bar.open, order.trigger)
             fill = reference + slip(reference, cfg, slippage_multiplier)
-            shares = min(order.shares, floor(equity * cfg.leverage / fill))
+            if not isfinite(fill) or fill <= 0:
+                raise ValueError(f"Invalid modeled entry price {fill:g} at epoch {bar.time}. "
+                                 "Check the slippage settings.")
+            buying_power = Fraction(str(equity)) * Fraction(str(cfg.leverage))
+            shares = min(order.shares, buying_power // Fraction(str(fill)))
             if shares > 0:
                 position = Position(order, bar.time, reference, fill, shares, order.initial_stop, fill)
                 events.append(order.event(bar.time, "filled", shares=shares))
@@ -252,7 +260,13 @@ def replay_session(
             events.append(OrderEvent(effective, "skipped", entry_type, None, bar.time, trigger, stop,
                                      reason="invalid_stop"))
             continue
-        shares = floor(min(equity * settings.risk_pct / 100 / (trigger - stop), equity * cfg.leverage / trigger))
+        # The order levels are tick-rounded. Preserve their decimal distance through flooring.
+        balance = Fraction(str(equity))
+        trigger_price = Fraction(str(trigger))
+        distance = trigger_price - Fraction(str(stop))
+        risk_budget = balance * Fraction(str(settings.risk_pct)) / 100
+        buying_power = balance * Fraction(str(cfg.leverage))
+        shares = min(risk_budget // distance, buying_power // trigger_price)
         if shares <= 0 or (working is not None and trigger >= working.trigger):
             reason = "zero_shares" if shares <= 0 else "not_lower"
             events.append(OrderEvent(effective, "skipped", entry_type, None, bar.time, trigger, stop,

@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import math
 import re
+import sqlite3
 import struct
 import tomllib
 from dataclasses import asdict, replace
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from .opening_range import EntrySettings, Settings, WilderATR, replay_session, session_vwap
 from .opening_range_report import write_report
-from .sessions import NEW_YORK, sessions
+from .sessions import NEW_YORK, Session, sessions
 from .store import BAR_COLUMNS, Bar, Store
 
 DEFAULT_START = date(2020, 1, 1)
@@ -67,8 +68,11 @@ def output_path(ticker: str, start: date, end: date, explicit: Path | None,
     checkout_baseline = Path(__file__).resolve().parents[1] / LEGACY_BASELINE
     if _same_path(path, LEGACY_BASELINE) or _same_path(path, checkout_baseline):
         raise ValueError("The original 2020 report is reserved as the baseline. Choose another output path.")
-    if cache is not None and _same_path(path, cache):
-        raise ValueError("Report output must be separate from the input cache.")
+    if cache is not None:
+        protected = {base.with_name(base.name + suffix) for base in (cache, cache.resolve())
+                     for suffix in ("", "-wal", "-shm", "-journal")}
+        if any(_same_path(path, candidate) for candidate in protected):
+            raise ValueError("Report output must be separate from the input cache and SQLite sidecars.")
     return path
 
 
@@ -124,6 +128,31 @@ def _append_balance(points: list[dict], timestamp: int, value: float) -> None:
         points.append(point)
 
 
+def _verified_bars(db: sqlite3.Connection, session: Session, ticker: str) -> list[Bar]:
+    day = session.date.isoformat()
+    bounds = day, session.open_utc, session.close_utc, ticker
+    bar_columns = ", ".join("b." + name for name in BAR_COLUMNS.split(", "))
+    sources = db.execute(
+        f"""SELECT {bar_columns}, a.session_date, a.open_utc, a.close_utc,
+                   json_extract(a.request, '$.symbol')
+            FROM bars b LEFT JOIN attempts a ON a.id=b.first_attempt
+            WHERE b.time>=? AND b.time<? ORDER BY b.time""",
+        (session.open_utc, session.close_utc),
+    ).fetchall()
+    if [row[0] for row in sources] != list(session.minutes):
+        raise ValueError(f"Incomplete regular-session input on {day}.")
+    if any(row[6:] != bounds for row in sources):
+        raise ValueError(f"Unverified canonical bar source for {ticker} on {day}.")
+    completion = db.execute(
+        """SELECT 1 FROM attempts WHERE session_date=? AND open_utc=? AND close_utc=?
+           AND json_extract(request, '$.symbol')=? AND status='complete' LIMIT 1""",
+        bounds,
+    ).fetchone()
+    if completion is None:
+        raise ValueError(f"Missing verified session completion for {ticker} on {day}.")
+    return [Bar(*row[:6]) for row in sources]
+
+
 def run(ticker: str, store: Store, settings: Settings, start: date, end: date) -> dict:
     if start > end:
         raise ValueError("The start date must be on or before the end date.")
@@ -150,12 +179,7 @@ def run(ticker: str, store: Store, settings: Settings, start: date, end: date) -
         if not any(s.date >= start for s in calendar):
             raise ValueError("No US regular sessions in the requested period.")
         for session in calendar:
-            bars = [Bar(*r) for r in db.execute(
-                f"SELECT {BAR_COLUMNS} FROM bars WHERE time>=? AND time<? ORDER BY time",
-                (session.open_utc, session.close_utc),
-            )]
-            if [bar.time for bar in bars] != list(session.minutes) or not Store.has_completed_response(db, session):
-                raise ValueError(f"Incomplete regular-session input on {session.date.isoformat()}.")
+            bars = _verified_bars(db, session, ticker)
             if db.execute(
                 "SELECT 1 FROM conflicts WHERE time>=? AND time<? LIMIT 1",
                 (session.open_utc, session.close_utc),
