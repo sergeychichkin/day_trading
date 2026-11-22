@@ -4,9 +4,12 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from fractions import Fraction
 from math import ceil, floor, isfinite
+from typing import Literal
 
 from .sessions import Session
 from .store import Bar
+
+RuleVersion = Literal["legacy", "revised"]
 
 
 @dataclass(frozen=True)
@@ -149,6 +152,7 @@ class Position:
     stop: float
     best: float
     stop_updates: list[tuple[int, float]] = field(default_factory=list)
+    trail_pending: bool = False
 
     def close(self, time: int, reference: float, reason: str, cfg: Settings,
               daily_ratio: float | None, multiplier: float, *, ambiguous: bool = False) -> Trade:
@@ -176,7 +180,7 @@ class Position:
 def replay_session(
     session: Session, bars: list[Bar], atrs: list[float | None], equity: float,
     cfg: Settings, daily_ratio: float | None, slippage_multiplier: float,
-    *, vwaps: list[float | None] | None = None,
+    *, vwaps: list[float | None] | None = None, rule_version: RuleVersion = "legacy",
 ) -> SessionReplay:
     opening_high = max(b.high for b in bars[:15])
     vwap = session_vwap(bars) if vwaps is None else vwaps
@@ -185,6 +189,7 @@ def replay_session(
     working = position = None
     trades, events = [], []
     next_id = 1
+    revised = rule_version == "revised"
 
     for i, bar in enumerate(bars[:exit_index + 1]):
         if i == entry_deadline and working is not None:
@@ -227,9 +232,18 @@ def replay_session(
         atr = atrs[i]
         if position is not None:
             position.best = max(position.best, bar.high)
-            if (i >= cfg.trail_lookback and i + 1 < exit_index and atr is not None
-                    and vwap[i] is not None and bar.close < bar.open and bar.high < vwap[i]):
-                candidate = order_price(min(b.low for b in bars[i - cfg.trail_lookback:i + 1])
+            bear_below_vwap = vwap[i] is not None and bar.close < bar.open and bar.high < vwap[i]
+            update_stop = bear_below_vwap
+            if revised:
+                confirms_trail = position.trail_pending and bar.close > bar.open
+                update_stop = confirms_trail and cfg.trail_lookback > 0
+                if confirms_trail:
+                    position.trail_pending = False
+                elif bear_below_vwap:
+                    position.trail_pending = True
+            if update_stop and i >= cfg.trail_lookback and i + 1 < exit_index and atr is not None:
+                lookback_end = i if revised else i + 1
+                candidate = order_price(min(b.low for b in bars[i - cfg.trail_lookback:lookback_end])
                                         - cfg.trail_atr * atr, cfg.tick_size, up=False)
                 if candidate > position.stop:
                     position.stop = candidate
@@ -239,8 +253,9 @@ def replay_session(
             continue
         if cfg.entry1.enabled and i >= 15 and bar.close > bar.open and bar.low > opening_high:
             entry_type, settings = "entry1", cfg.entry1
-        elif (cfg.entry2.enabled and i >= 4 and bar.close < bar.open
-              and all(b.close > b.open for b in bars[i - 4:i])):
+        elif (cfg.entry2.enabled and i >= 4 and (bar.close <= bar.open if revised else bar.close < bar.open)
+              and all(b.close > b.open for b in bars[i - 4:i])
+              and (not revised or any(vwap[j] is not None and bars[j].high > vwap[j] for j in (i - 1, i)))):
             entry_type, settings = "entry2", cfg.entry2
         else:
             continue

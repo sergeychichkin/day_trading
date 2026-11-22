@@ -1,8 +1,9 @@
+from dataclasses import replace
 from datetime import date
 
 import pytest
 
-from qqq_viewer.opening_range import Settings, WilderATR, commission, replay_session
+from qqq_viewer.opening_range import EntrySettings, Settings, WilderATR, commission, replay_session
 from qqq_viewer.sessions import Session
 from qqq_viewer.store import Bar
 
@@ -101,6 +102,71 @@ def test_doji_breaks_entry2_streak():
     bars = day({0: (99, 100, 98, 99.5), 1: (99, 100, 98, 99.5), 3: (99, 100, 98, 99.5),
                 4: (100, 102, 99, 99.5)})
     assert replay(bars, entry1=False).events == []
+
+
+@pytest.mark.parametrize(("close", "previous_vwap", "signal_vwap", "broken_streak", "placed"), [
+    (99.5, 101, 101, False, True),
+    (100, 99, 103, False, True),
+    (100, 100, 102, False, False),
+    (99.5, None, None, False, False),
+    (99.5, None, 101, False, True),
+    (100, 99, None, False, True),
+    (99.5, 99, 101, True, False),
+])
+def test_revised_entry2_uses_each_candles_own_vwap(close, previous_vwap, signal_vwap, broken_streak, placed):
+    changes = {i: (99, 100, 98, 99.5) for i in range(4)}
+    if broken_streak:
+        changes[1] = (99, 100, 98, 99)
+    bars = day(changes | {4: (100, 102, 99, close)})
+    vwap = [None] * len(bars)
+    vwap[3:5] = [previous_vwap, signal_vwap]
+    cfg = replace(CFG, entry1=EntrySettings(enabled=False), entry2=EntrySettings())
+    result = replay_session(SESSION, bars, [2.] * len(bars), 100_000, cfg, None, 1.,
+                            vwaps=vwap, rule_version="revised")
+    assert [(e.action, e.entry_type, e.signal_time) for e in result.events if e.action == "placed"] == (
+        [("placed", "entry2", bars[4].time)] if placed else []
+    )
+
+
+def test_revised_trail_waits_for_bull_and_rearms():
+    bars = day({
+        15: (101, 103, 101, 102), 16: (104, 105, 103, 104),
+        **{i: (108, 109, 106, 108) for i in range(17, 32)},
+        20: (109, 110, 106, 108), 22: (109, 110, 107, 108),
+        24: (106, 109, 104, 108), 25: (109, 110, 107, 109),
+        26: (110, 111, 108, 109), 27: (109, 111, 108, 110),
+        28: (109, 111, 108, 110), 29: (109, 111, 108, 110),
+        30: (110, 111, 108, 109), 31: (109, 111, 108, 110),
+        32: (107, 109, 106, 108),
+    })
+    atrs = [2.] * len(bars)
+    atrs[24] = 4.
+    result = replay_session(SESSION, bars, atrs, 100_000, CFG, None, 1.,
+                            vwaps=[130.] * len(bars), rule_version="revised")
+    trade = result.trades[0]
+    assert trade.stop_updates == [(bars[25].time, 105.), (bars[32].time, 107.5)]
+    assert trade.exit_time == bars[32].time
+
+
+def test_revised_trail_pending_state_ends_with_position():
+    bars = day({
+        15: (101, 103, 101, 102), 16: (104, 105, 103, 104),
+        20: (105, 106, 101, 103), 21: (97, 98, 95, 96),
+        25: (101, 103, 101, 102), 26: (104, 106, 103, 105),
+    })
+    result = replay_session(SESSION, bars, [2.] * len(bars), 100_000, CFG, None, 1.,
+                            vwaps=[130.] * len(bars), rule_version="revised")
+    assert [trade.entry_time for trade in result.trades] == [bars[16].time, bars[26].time]
+    assert [trade.stop_updates for trade in result.trades] == [[], []]
+
+
+def test_revised_zero_trail_lookback_leaves_stop_unchanged():
+    bars = day({15: (101, 103, 101, 102), 16: (104, 105, 103, 104),
+                17: (105, 106, 103, 104), 18: (104, 106, 103, 105)})
+    result = replay_session(SESSION, bars, [2.] * len(bars), 100_000,
+                            replace(CFG, trail_lookback=0), None, 1.,
+                            vwaps=[130.] * len(bars), rule_version="revised")
+    assert result.trades[0].stop_updates == []
 
 
 def test_cross_entry_replacement_resizes_and_earlier_fill_has_precedence():
