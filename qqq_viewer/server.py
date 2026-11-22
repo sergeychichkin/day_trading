@@ -70,11 +70,24 @@ def month_payload(store: Store, month: str) -> dict:
             unverified = sum(not store.has_completed_response(db, session) for session in month_sessions)
             warmup = db.execute("SELECT volume FROM bars WHERE time<? ORDER BY time DESC LIMIT 19", (start,))
             window = deque((r[0] for r in reversed(warmup.fetchall())), maxlen=20)
-            for bar in db.execute(
+            session_date = None
+            session_volume = weighted_price = 0.0
+            for row in db.execute(
                 f"SELECT {BAR_COLUMNS} FROM bars WHERE time>=? AND time<? ORDER BY time", (start, end),
             ):
-                window.append(bar[-1])
-                rows.append(asdict(Bar(*bar)) | {"volume_sma_20": sum(window) / 20 if len(window) == 20 else None})
+                bar = Bar(*row)
+                bar_date = _bar_date(bar.time)
+                if bar_date != session_date:
+                    session_date = bar_date
+                    session_volume = weighted_price = 0.0
+                typical_price = (bar.high + bar.low + bar.close) / 3
+                session_volume += bar.volume
+                weighted_price += typical_price * bar.volume
+                window.append(bar.volume)
+                rows.append(asdict(bar) | {
+                    "volume_sma_20": sum(window) / 20 if len(window) == 20 else None,
+                    "session_vwap": weighted_price / session_volume if session_volume else None,
+                })
             conflict_times = [row[0] for row in db.execute(
                 "SELECT DISTINCT time FROM conflicts WHERE time>=? AND time<? ORDER BY time", (start, end),
             )]

@@ -10,6 +10,7 @@ const dash = "—";
 const up = "#10b981";
 const down = "#ef4444";
 const volumeSma = "#38bdf8";
+const vwapColor = "#c6a1fa";
 const east = "America/New_York";
 const priceText = new Intl.NumberFormat("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 4});
 const volumeText = new Intl.NumberFormat("en-US", {maximumFractionDigits: 2});
@@ -61,6 +62,7 @@ const sma = chart.addLineSeries({
 });
 chart.priceScale("volume").applyOptions({scaleMargins: {top: 0.78, bottom: 0.02}});
 
+const vwapSeries = [];
 let plottedBars = new Map();
 let conflictingTimes = new Set();
 let displayedSessions = [];
@@ -98,8 +100,9 @@ function updateLegend(timestamp) {
     const bar = plottedBars.get(timestamp);
     document.querySelector("#legend-conflict").hidden = !conflictingTimes.has(timestamp);
     document.querySelector("#legend-time").textContent = timestamp ? stampText.format(timestamp * 1000) : dash;
-    for (const field of ["open", "high", "low", "close", "volume", "sma"]) {
-        const value = field === "sma" ? bar?.volume_sma_20 : bar?.[field];
+    const values = {...bar, sma: bar?.volume_sma_20, vwap: bar?.session_vwap};
+    for (const field of ["open", "high", "low", "close", "volume", "sma", "vwap"]) {
+        const value = values[field];
         const formatter = field === "volume" || field === "sma" ? volumeText : priceText;
         document.querySelector("#legend-" + field).textContent = value == null ? dash : formatter.format(value);
     }
@@ -127,6 +130,8 @@ function clearSeries() {
     candles.setData([]);
     volume.setData([]);
     sma.setData([]);
+    for (const series of vwapSeries) chart.removeSeries(series);
+    vwapSeries.length = 0;
     unitElement.textContent = "";
     updateLegend();
 }
@@ -150,9 +155,11 @@ function showMonth(data) {
     let firstSessionIndex = null;
     for (const session of displayedSessions) {
         const sessionStart = prices.length;
+        const vwapPoints = [];
         for (let time = session.open_utc; time < session.close_utc; time += 60) {
             const bar = plottedBars.get(time);
             prices.push(bar ?? {time});
+            if (bar?.session_vwap != null) vwapPoints.push({time, value: bar.session_vwap});
             if (!bar) {
                 averages.push({time});
                 continue;
@@ -160,6 +167,17 @@ function showMonth(data) {
             if (firstSessionIndex === null) firstSessionIndex = sessionStart;
             volumes.push({time, value: bar.volume, color: bar.close >= bar.open ? "#10b98180" : "#ef444480"});
             if (bar.volume_sma_20 != null) averages.push({time, value: bar.volume_sma_20});
+        }
+        if (vwapPoints.length) {
+            const series = chart.addLineSeries({
+                color: vwapColor,
+                lineWidth: 2,
+                lastValueVisible: false,
+                priceLineVisible: false,
+                crosshairMarkerVisible: false,
+            });
+            series.setData(vwapPoints);
+            vwapSeries.push(series);
         }
     }
     candles.setData(prices);

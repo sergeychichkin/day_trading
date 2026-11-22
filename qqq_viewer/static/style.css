@@ -59,6 +59,7 @@ p, dl, dd { margin: 0; }
 .legend dt { color: #a5b4c7; }
 .legend dd { min-width: 44px; }
 .legend .sma dt, .legend .sma dd { color: #56c9f6; }
+.legend .vwap dt, .legend .vwap dd { color: #c6a1fa; }
 
 .chart-body { position: relative; }
 #chart { width: 100%; height: max(400px, calc(100dvh - 175px)); }

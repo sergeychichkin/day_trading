@@ -1,4 +1,4 @@
-﻿import json
+import json
 from contextlib import contextmanager
 from datetime import date
 from threading import Thread
@@ -74,3 +74,19 @@ def test_month_identifies_the_conflicting_minute(market_cache):
     assert payload["bars"][0]["volume"] == 20
     assert payload["conflict_times"] == [february.open_utc]
     assert payload["coverage"]["conflicting"] == 1
+
+
+def test_session_vwap_weights_typical_prices_and_resets_at_each_open(tmp_path):
+    store = Store(tmp_path / "vwap.db")
+    first, second = sessions(date(2020, 2, 3), date(2020, 2, 4))
+    t = first.open_utc
+    store.record_attempt(first, Attempt("complete", [
+        Bar(t, 90, 103, 90, 95, 0).to_raw(),
+        Bar(t + 60, 100, 112, 100, 106, 10).to_raw(),
+        Bar(t + 120, 100, 124, 100, 118, 30).to_raw(),
+    ]))
+    store.record_attempt(second, Attempt("complete", [
+        Bar(second.open_utc, 120, 130, 120, 125, 5).to_raw(),
+    ]))
+    month = month_payload(store, "2020-02")
+    assert [bar["session_vwap"] for bar in month["bars"]] == [None, 106, 112, 125]
