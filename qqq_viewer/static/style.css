@@ -1,4 +1,4 @@
-﻿:root {
+:root {
     color-scheme: dark;
     font-family: Geist, "Segoe UI", sans-serif;
     background: #0b111b;
@@ -51,7 +51,8 @@ p, dl, dd { margin: 0; }
     font-size: 12px;
     font-variant-numeric: tabular-nums;
 }
-#legend-time { min-width: 150px; font-weight: 600; }
+#legend-time { display: inline-block; min-width: 150px; font-weight: 600; }
+#legend-conflict { color: #f0bf7f; }
 .legend dl, .legend dl div { display: flex; flex-wrap: wrap; }
 .legend dl { gap: 6px 18px; }
 .legend dl div { gap: 5px; }

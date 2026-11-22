@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from itertools import groupby
 from pathlib import Path
+from statistics import median
 from time import sleep
 from typing import Protocol
 
@@ -13,7 +14,7 @@ from .tws import ContractIdentity, TwsHistory
 
 DEFAULT_DB = Path("data/qqq.sqlite3")
 RETRYABLE = {"timeout", "pacing"}
-STOP_STATUSES = {"disconnected", "entitlement", "pacing"}
+STOP_STATUSES = {"disconnected", "entitlement", "pacing", "unit_unverified"}
 
 
 class HistoryClient(Protocol):
@@ -62,23 +63,35 @@ def summarize(store: Store, target: list[Session], failed: Session | None = None
 
 def _save_probe(store: Store, client: HistoryClient, contract: ContractIdentity, session: Session) -> str:
     attempt = client.request_session(contract, session)
-    if not any(Bar.from_raw(raw, session) for raw in attempt.raw):
-        store.record_attempt(session, attempt)
-        return attempt.diagnostic or "The first January 2020 session returned no usable bars."
-    if client.volume_unit is None:
-        # A dry, audited probe leaves usable values uncommitted until the operator specifies units.
-        store.record_attempt(session, Attempt("unit_unverified", attempt.raw, "Confirm TWS volume units.",
-                                             attempt.request))
-        return "Set --volume-unit shares or lots to match the TWS API volume setting."
-    store.record_attempt(session, attempt)
-    if attempt.status != "complete":
-        return attempt.diagnostic or f"January probe ended with status {attempt.status}."
-    return ""
+    bars = [bar for raw in attempt.raw if (bar := Bar.from_raw(raw, session))]
+    previous = {b.time: b.volume for b in store.bars_between(session.open_utc, session.close_utc)}
+    diagnostic = attempt.diagnostic
+    status = attempt.status
+    ratios = [bar.volume / previous[bar.time] for bar in bars if previous.get(bar.time, 0) > 0]
+    if not bars:
+        if status == "complete":
+            status = "empty"
+        diagnostic = diagnostic or "The first January 2020 session returned no usable bars."
+    elif client.volume_unit is None:
+        status = "unit_unverified"
+        diagnostic = "Set --volume-unit shares or lots to match the TWS API volume setting."
+    elif previous and (len(ratios) < 20 or not 0.25 <= median(ratios) <= 4):
+        status = "unit_unverified"
+        diagnostic = "TWS volume scale differs from the cached January probe or cannot be verified."
+    elif status != "complete":
+        diagnostic = diagnostic or f"January probe ended with status {status}."
+    store.record_attempt(session, Attempt(status, attempt.raw, diagnostic, attempt.request))
+    return diagnostic
+
+
+def history_duration(first: Session, last: Session) -> str:
+    span = last.close_utc - first.open_utc
+    days = (span + 86399) // 86400
+    return "1 M" if days > 7 else f"{days} D"
 
 
 def request_windows(target: list[Session]):
-    anchor = date(2020, 1, 6).toordinal()
-    for _, group in groupby(target, key=lambda session: (session.date.toordinal() - anchor) // 14):
+    for _, group in groupby(target, key=lambda session: (session.date.year, session.date.month)):
         yield list(group)
 
 
@@ -105,18 +118,20 @@ def run_backfill(store: Store, client: HistoryClient, now: datetime, probe_only:
         store.require_volume_unit(client.volume_unit)
     if not probe_only:
         store.set_target(target[-1].date)
+    if not probe_only and client.volume_unit is not None and not any(map(store.pending, target)):
+        return summarize(store, target)
     contract = client.qualify_qqq()
-    if probe_only or store.pending(first) or client.volume_unit is None:
-        diagnostic = _save_probe(store, client, contract, first)
-        if probe_only or diagnostic:
-            return summarize(store, [first] if probe_only else target, first if diagnostic else None, diagnostic)
+    diagnostic = _save_probe(store, client, contract, first)
+    if probe_only or diagnostic:
+        return summarize(store, [first] if probe_only else target, first if diagnostic else None, diagnostic)
 
     for window in request_windows(target):
         pending = [session for session in window if store.pending(session)]
         if len(pending) > 1 and hasattr(client, "request_bars"):
-            attempt = client.request_bars(contract, pending[-1], "2 W")
+            duration = history_duration(pending[0], pending[-1])
+            attempt = client.request_bars(contract, pending[-1], duration)
             save_window(store, pending, attempt)
-            print(f"{pending[0].date} to {pending[-1].date}  {attempt.status}  {len(attempt.raw)} rows"
+            print(f"{pending[0].date} to {pending[-1].date}  {attempt.status}  {len(attempt.raw)} provider rows"
                   f"{'  ' + attempt.diagnostic if attempt.diagnostic else ''}", flush=True)
             if attempt.status in STOP_STATUSES:
                 return summarize(store, target, pending[0], attempt.diagnostic)
@@ -131,7 +146,7 @@ def run_backfill(store: Store, client: HistoryClient, now: datetime, probe_only:
                 wait(20 * (attempt_number + 1))
             if attempt.status in STOP_STATUSES:
                 return summarize(store, target, session, attempt.diagnostic)
-            print(f"{session.date}  {attempt.status}  {len(attempt.raw)} rows"
+            print(f"{session.date}  {attempt.status}  {len(attempt.raw)} provider rows"
                   f"{'  ' + attempt.diagnostic if attempt.diagnostic else ''}", flush=True)
     return summarize(store, target)
 

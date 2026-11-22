@@ -80,3 +80,32 @@ def test_late_response_cannot_replace_newer_month(page, market_cache):
         page.wait_for_load_state("networkidle")
         expect(page.locator("#month")).to_have_value("2020-03")
         expect(page.locator("#coverage")).to_contain_text("No cached bars")
+
+
+def test_missing_open_keeps_legend_blank_until_a_real_bar_is_hovered(page, tmp_path):
+    from datetime import date
+
+    from qqq_viewer.sessions import sessions
+    from qqq_viewer.store import Attempt, Bar, Store
+
+    store = Store(tmp_path / "late-open.db")
+    session = sessions(date(2020, 2, 3), date(2020, 2, 3))[0]
+    late = session.open_utc + 150 * 60
+    first = Bar(late, 220, 221, 219, 220, 20)
+    revised = Bar(late, 220, 221, 219, 220, 21)
+    store.record_attempt(session, Attempt("complete", [first.to_raw(), revised.to_raw()]))
+    capture_chart(page)
+    with running_server(store) as url:
+        page.goto(url)
+        expect(page.locator("#coverage")).to_contain_text("1 conflicting minute")
+        expect(page.locator("#legend-time")).to_contain_text("09:30", timeout=2000)
+        expect(page.locator("#legend-open")).to_have_text("—")
+        assert not page.locator("#legend-conflict").is_visible()
+        page.evaluate("testChart.timeScale().setVisibleLogicalRange({from: 120, to: 239})")
+        page.wait_for_function("testChart.timeScale().getVisibleLogicalRange().from === 120")
+        box = page.locator("#chart").bounding_box()
+        x = page.evaluate("t => testChart.timeScale().timeToCoordinate(t)", late)
+        page.mouse.move(box["x"] + x, box["y"] + 160)
+        expect(page.locator("#legend-open")).to_have_text("220.00")
+        expect(page.locator("#legend-volume")).to_have_text("20")
+        expect(page.locator("#legend-conflict")).to_be_visible()

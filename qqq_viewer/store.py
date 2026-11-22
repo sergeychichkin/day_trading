@@ -49,13 +49,15 @@ class Bar:
         return tuple(map(str, astuple(self)))
 
     @classmethod
-    def from_raw(cls, raw: RawBar, session: Session) -> "Bar | None":
+    def from_raw(cls, raw: RawBar, session: Session | None = None) -> "Bar | None":
         try:
             time = int(raw[0])
             opening, high, low, close, volume = map(float, raw[1:])
         except (ValueError, OverflowError):
             return None
-        if time not in session.minutes or not all(map(math.isfinite, (opening, high, low, close, volume))):
+        if time % 60 or (session is not None and time not in session.minutes):
+            return None
+        if not all(map(math.isfinite, (opening, high, low, close, volume))):
             return None
         if low <= 0 or low > min(opening, close) or high < max(opening, close) or volume < 0:
             return None
@@ -140,10 +142,15 @@ class Store:
                     "INSERT INTO raw_bars(attempt_id, time, open, high, low, close, volume) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)", (attempt_id, *raw)
                 ).lastrowid
-                bar = Bar.from_raw(raw, session)
+                bar = Bar.from_raw(raw)
                 if bar is None or attempt.status == "unit_unverified":
                     continue
                 previous = existing.get(bar.time)
+                if bar.time not in session.minutes:
+                    canonical = db.execute(f"SELECT {BAR_COLUMNS} FROM bars WHERE time=?", (bar.time,)).fetchone()
+                    if canonical and Bar(*canonical) != bar:
+                        additions.append((bar.time, attempt_id, raw_id))
+                    continue
                 if previous is None:
                     values = (*astuple(bar), attempt_id)
                     db.execute("INSERT INTO bars VALUES (?, ?, ?, ?, ?, ?, ?)", values)

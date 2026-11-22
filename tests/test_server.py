@@ -63,3 +63,14 @@ def test_month_api_validation_and_empty_month(market_cache):
         with pytest.raises(HTTPError) as error:
             urlopen(f"{url}/api/month/2020-13")
         assert error.value.code == 400
+
+
+def test_month_identifies_the_conflicting_minute(market_cache):
+    february = sessions(date(2020, 2, 3), date(2020, 2, 3))[0]
+    market_cache.record_attempt(
+        february, Attempt("complete", [(str(february.open_utc), "220", "221", "219", "220.5", "21")]),
+    )
+    payload = month_payload(market_cache, "2020-02")
+    assert payload["bars"][0]["volume"] == 20
+    assert payload["conflict_times"] == [february.open_utc]
+    assert payload["coverage"]["conflicting"] == 1

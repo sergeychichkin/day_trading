@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import json
 import re
 import sqlite3
@@ -57,7 +57,8 @@ def month_payload(store: Store, month: str) -> dict:
     start = int(datetime.combine(first, time.min, NEW_YORK).timestamp())
     end = int(datetime.combine(following, time.min, NEW_YORK).timestamp())
     rows = []
-    expected = conflicts = unverified = 0
+    expected = unverified = 0
+    conflict_times = []
     month_sessions = []
     unit = None
     if store.path.is_file():
@@ -74,19 +75,19 @@ def month_payload(store: Store, month: str) -> dict:
             ):
                 window.append(bar[-1])
                 rows.append(asdict(Bar(*bar)) | {"volume_sma_20": sum(window) / 20 if len(window) == 20 else None})
-            conflicts = db.execute(
-                "SELECT COUNT(DISTINCT time) FROM conflicts WHERE time>=? AND time<?", (start, end),
-            ).fetchone()[0]
+            conflict_times = [row[0] for row in db.execute(
+                "SELECT DISTINCT time FROM conflicts WHERE time>=? AND time<? ORDER BY time", (start, end),
+            )]
             volume_unit = db.execute("SELECT value FROM metadata WHERE key='volume_unit'").fetchone()
             unit = volume_unit[0] if volume_unit else None
     missing = max(0, expected - len(rows))
     coverage_status = "empty" if not rows else "incomplete" if missing or unverified else "complete"
     return {
-        "month": month, "bars": rows,
+        "month": month, "bars": rows, "conflict_times": conflict_times,
         "sessions": [{"date": s.date.isoformat(), "open_utc": s.open_utc, "close_utc": s.close_utc}
                      for s in month_sessions],
         "coverage": {"expected": expected, "received": len(rows), "missing": missing,
-                     "conflicting": conflicts, "unverified_sessions": unverified, "status": coverage_status},
+                     "conflicting": len(conflict_times), "unverified_sessions": unverified, "status": coverage_status},
         "volume_unit": unit,
     }
 

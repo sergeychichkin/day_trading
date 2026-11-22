@@ -33,3 +33,13 @@ def test_partial_timeout_then_completed_response_reconciles_coverage(tmp_path):
     assert store.missing_minutes(SESSION) == []
     assert not store.pending(SESSION)
     assert store.bars_between(SESSION.open_utc, SESSION.close_utc) == [bar(0, 100), bar(1, 101)]
+
+
+def test_overlapping_row_from_later_request_flags_earlier_accepted_minute(tmp_path):
+    store = Store(tmp_path / "cache.db")
+    store.record_attempt(SESSION, attempt("complete", bar(0, 100)))
+    later = Session(date(2020, 1, 3), SESSION.open_utc + 86400, SESSION.close_utc + 86400)
+    store.record_attempt(later, attempt("complete", bar(0, 101)))
+    assert store.bars_between(SESSION.open_utc, SESSION.close_utc) == [bar(0, 100)]
+    with store.reader() as db:
+        assert db.execute("SELECT time FROM conflicts").fetchall() == [(SESSION.open_utc,)]

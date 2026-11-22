@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 
 const monthPicker = document.querySelector("#month");
 const chartElement = document.querySelector("#chart");
@@ -62,6 +62,7 @@ const sma = chart.addLineSeries({
 chart.priceScale("volume").applyOptions({scaleMargins: {top: 0.78, bottom: 0.02}});
 
 let plottedBars = new Map();
+let conflictingTimes = new Set();
 let displayedSessions = [];
 let selection = 0;
 
@@ -95,6 +96,7 @@ candles.attachPrimitive(sessionDividers);
 
 function updateLegend(timestamp) {
     const bar = plottedBars.get(timestamp);
+    document.querySelector("#legend-conflict").hidden = !conflictingTimes.has(timestamp);
     document.querySelector("#legend-time").textContent = timestamp ? stampText.format(timestamp * 1000) : dash;
     for (const field of ["open", "high", "low", "close", "volume", "sma"]) {
         const value = field === "sma" ? bar?.volume_sma_20 : bar?.[field];
@@ -119,6 +121,8 @@ function setEmpty(message) {
 
 function clearSeries() {
     plottedBars.clear();
+    conflictingTimes.clear();
+    candles.setMarkers([]);
     displayedSessions = [];
     candles.setData([]);
     volume.setData([]);
@@ -129,6 +133,7 @@ function clearSeries() {
 
 function showMonth(data) {
     plottedBars = new Map(data.bars.map(bar => [bar.time, bar]));
+    conflictingTimes = new Set(data.conflict_times);
     displayedSessions = data.sessions;
     unitElement.textContent = data.volume_unit ? " (" + data.volume_unit + ")" : "";
 
@@ -158,12 +163,15 @@ function showMonth(data) {
         }
     }
     candles.setData(prices);
+    candles.setMarkers([...conflictingTimes].map(time => ({
+        time, position: "aboveBar", shape: "circle", color: "#f0bf7f",
+    })));
     volume.setData(volumes);
     sma.setData(averages);
     if (firstSessionIndex !== null) {
         chart.timeScale().setVisibleLogicalRange({from: firstSessionIndex, to: firstSessionIndex + 119});
     }
-    updateLegend(data.bars[0].time);
+    updateLegend(prices[firstSessionIndex]?.time ?? data.bars[0].time);
     setEmpty("");
 
     const parts = [

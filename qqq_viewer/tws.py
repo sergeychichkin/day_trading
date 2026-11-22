@@ -92,6 +92,7 @@ class TwsHistory:
 
     def request_bars(self, contract: ContractIdentity, session: Session, duration: str = "1 D") -> Attempt:
         params = historical_parameters(session, duration)
+        timeout = self.timeout_seconds if duration == "1 D" else max(75, self.timeout_seconds)
         request = {
             "source": "IBKR TWS", "symbol": "QQQ", "con_id": contract.con_id,
             "exchange": "SMART", "primary_exchange": contract.primary_exchange, "currency": "USD",
@@ -115,9 +116,9 @@ class TwsHistory:
         try:
             client.reqHistoricalData(request_id, stock, *params)
             # Waiting on the callback ourselves keeps partial rows available on timeout.
-            util.run(future, timeout=self.timeout_seconds)
+            util.run(future, timeout=timeout)
         except TimeoutError:
-            diagnostic = f"No completed response in {self.timeout_seconds:g} seconds."
+            diagnostic = f"No completed response in {timeout:g} seconds."
             status = "timeout"
             if client.isReady():
                 client.cancelHistoricalData(request_id)
