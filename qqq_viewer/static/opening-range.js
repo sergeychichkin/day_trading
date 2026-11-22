@@ -155,7 +155,7 @@ function indexSelectedRun() {
         }
     }
 }
-let overlays = [], levels = [], chartBars = new Map(), signalStops = new Map(), opens = [], shownMonth = null, stopLine = null;
+let overlays = [], levels = [], rangeLines = [], chartBars = new Map(), signalStops = new Map(), opens = [], shownMonth = null, stopLine = null;
 candles.attachPrimitive({
     paneViews: () => [{
         zOrder: () => "bottom",
@@ -189,12 +189,18 @@ price.subscribeCrosshairMove(({time: stamp}) => {
         ...(signalStops.has(stamp) ? ["Signal", "Initial stop " + money(signalStops.get(stamp))] : []),
     ].join(" · ");
 });
-function showMonth(key) {
+function clearTradeOverlays() {
     if (stopLine) price.removeSeries(stopLine);
     stopLine = null;
-    for (const series of overlays) price.removeSeries(series);
+    for (const series of rangeLines) price.removeSeries(series);
+    rangeLines = [];
     for (const level of levels) candles.removePriceLine(level);
     levels = [];
+}
+
+function showMonth(key) {
+    clearTradeOverlays();
+    for (const series of overlays) price.removeSeries(series);
     overlays = [];
     chartBars = new Map();
     signalStops = new Map();
@@ -257,18 +263,21 @@ let direction = 1;
 function selectTrade(t, row) {
     month.value = t.date.slice(0, 7);
     if (shownMonth !== month.value) showMonth(month.value);
-    for (const level of levels) candles.removePriceLine(level);
-    levels = [];
+    clearTradeOverlays();
     const day = run.months[month.value].find(d => d.date === t.date);
     const last = day.bars.at(-1)[0];
     const from = Math.max(day.bars[0][0], t.signal_time - 300);
+    const rangeAvailable = day.bars[15][0];
+    for (const [title, value] of [["Range high", day.range_high], ["Range low", day.range_low]]) {
+        rangeLines.push(addLine(price, [{time: rangeAvailable, value}, {time: last, value}], {
+            title, color: "#7eb8f1", lineWidth: 1, lineStyle: library.LineStyle.Dashed,
+        }));
+    }
     for (const [title, value, color] of [
-        ["Range high", day.range_high, "#7eb8f1"], ["Range low", day.range_low, "#7eb8f1"],
         ["Buy stop", t.entry_trigger, "#58daba"], ["Initial stop", t.initial_stop, "#ff8a8a"],
     ]) {
         levels.push(candles.createPriceLine({title, price: value, color, lineWidth: 1, lineStyle: library.LineStyle.Dashed}));
     }
-    if (stopLine) price.removeSeries(stopLine);
     const stopPath = [[t.entry_time, t.initial_stop], ...t.stop_updates];
     const stopEnd = Math.min(last, t.exit_time);
     if (stopEnd > stopPath.at(-1)[0]) stopPath.push([stopEnd, stopPath.at(-1)[1]]);
@@ -278,7 +287,10 @@ function selectTrade(t, row) {
     const exitLabels = {time: "13:00 exit", stop: "Protective stop", early_close: "Early-close liquidation"};
     orderSelect.value = keyOf(t.date, t.order_id);
     byId("selected-trade").textContent = "Trade " + t.number + " · " + t.date + " · " + entryLabel(t.entry_type) + " · Signal " +
-        time(t.signal_time) + " · Initial stop " + money(t.initial_stop) + " · " + exitLabels[t.exit_reason] + " · " + t.stop_updates.length +
+        time(t.signal_time) + " · Initial stop " + money(t.initial_stop) +
+        " · Buy " + time(t.entry_time) + " at " + fillPrice.format(t.entry_price) +
+        " · Exit " + time(t.exit_time) + " at " + fillPrice.format(t.exit_price) +
+        " · " + exitLabels[t.exit_reason] + " · " + t.stop_updates.length +
         " stop raises" + (t.ambiguous ? " · Adverse same-minute sequence" : "");
     price.timeScale().setVisibleRange({from, to: Math.min(last, t.exit_time + 600)});
     table.querySelector('[aria-selected="true"]')?.removeAttribute("aria-selected");
@@ -341,18 +353,21 @@ orderSelect.addEventListener("change", () => {
         selectTrade(trade, row);
         return;
     }
-    if (stopLine) price.removeSeries(stopLine);
-    stopLine = null;
-    for (const level of levels) candles.removePriceLine(level);
-    levels = [candles.createPriceLine({title: "Initial stop", price: order.initial_stop,
-        color: "#ff8a8a", lineWidth: 1, lineStyle: library.LineStyle.Dashed})];
+    clearTradeOverlays();
+    for (const [title, value, color] of [
+        ["Buy stop", order.entry_trigger, "#58daba"], ["Initial stop", order.initial_stop, "#ff8a8a"],
+    ]) {
+        levels.push(candles.createPriceLine({title, price: value, color, lineWidth: 1,
+            lineStyle: library.LineStyle.Dashed}));
+    }
     table.querySelector('[aria-selected="true"]')?.removeAttribute("aria-selected");
     const day = run.months[month.value].find(item => item.date === order.date);
     const last = day.bars.at(-1)[0];
     price.timeScale().setVisibleRange({from: Math.max(day.bars[0][0], order.signal_time - 300),
         to: Math.min(last, (order.end ?? day.close) + 300)});
     byId("selected-trade").textContent = entryLabel(order.entry_type) + " · " + order.date + " · Signal " +
-        time(order.signal_time) + " · Initial stop " + money(order.initial_stop) + " · " +
+        time(order.signal_time) + " · Buy stop " + money(order.entry_trigger) +
+        " · Initial stop " + money(order.initial_stop) + " · " +
         time(order.time) + "–" + time(order.end ?? day.close) + " · " + order.status;
 });
 function showRun() {

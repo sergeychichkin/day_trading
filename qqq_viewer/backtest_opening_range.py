@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import hashlib
 import math
 import re
@@ -55,10 +55,20 @@ def load_settings(path: Path) -> tuple[str, Path, Settings]:
     return ticker, (path.parent / data["cache"]).resolve(), settings
 
 
-def output_path(ticker: str, start: date, end: date, explicit: Path | None) -> Path:
+def _same_path(first: Path, second: Path) -> bool:
+    return first.resolve() == second.resolve() or (
+        first.is_file() and second.is_file() and first.samefile(second)
+    )
+
+
+def output_path(ticker: str, start: date, end: date, explicit: Path | None,
+                *, cache: Path | None = None) -> Path:
     path = explicit or Path("output") / f"{ticker}_opening_range_entries_{start}_{end}.html"
-    if path.resolve() == LEGACY_BASELINE.resolve():
+    checkout_baseline = Path(__file__).resolve().parents[1] / LEGACY_BASELINE
+    if _same_path(path, LEGACY_BASELINE) or _same_path(path, checkout_baseline):
         raise ValueError("The original 2020 report is reserved as the baseline. Choose another output path.")
+    if cache is not None and _same_path(path, cache):
+        raise ValueError("Report output must be separate from the input cache.")
     return path
 
 
@@ -211,7 +221,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         ticker, cache, cfg = load_settings(args.config)
-        output = output_path(ticker, args.start, args.end, args.output)
+        output = output_path(ticker, args.start, args.end, args.output, cache=cache)
         if not cache.is_file():
             raise ValueError(f"Cache file unavailable: {cache}")
         report = run(ticker, Store(cache, read_only=True), cfg, args.start, args.end)

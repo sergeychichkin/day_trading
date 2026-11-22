@@ -58,3 +58,23 @@ def test_output_reserves_original_baseline(monkeypatch, tmp_path):
     old = Path("output/QQQ_opening_range_2020-01-01_2020-12-31.html")
     with pytest.raises(ValueError, match="baseline"):
         output_path("QQQ", first, last, old)
+
+
+def test_protects_checkout_baseline_from_another_working_directory(monkeypatch, tmp_path):
+    from qqq_viewer import backtest_opening_range as cli
+
+    original = Path(cli.__file__).resolve().parents[1] / cli.LEGACY_BASELINE
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="baseline"):
+        cli.output_path("QQQ", cli.DEFAULT_START, cli.DEFAULT_END, original)
+
+
+def test_rejects_input_cache_as_report_destination(tmp_path):
+    from qqq_viewer.backtest_opening_range import output_path
+
+    cache = tmp_path / "input.sqlite3"
+    cache.write_bytes(b"fixture")
+    first, last = date(2020, 1, 1), date(2020, 12, 31)
+    with pytest.raises(ValueError, match="input cache"):
+        output_path("QQQ", first, last, cache, cache=cache)
+    assert cache.read_bytes() == b"fixture"

@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from playwright.sync_api import expect
 
@@ -23,7 +23,7 @@ def report_fixture(path: Path) -> None:
                     entry_time=stamp(fill), exit_time=stamp(exit_minute), shares=10, entry_price=106,
                     exit_price=107, pnl=8, commission=2, slippage=.2, atr_close_pct=1,
                     mfe_pct=.5, initial_stop=stop, entry_trigger=106, exit_reason="stop",
-                    stop_updates=[], ambiguous=False)
+                    stop_updates=[] if order_id == 2 else [[stamp(fill + 1), stop + 1]], ambiguous=False)
 
     events = [
         event("placed", 1, 5, 4, "entry2", 101),
@@ -69,16 +69,22 @@ def test_report_selects_distinct_same_day_trades_and_order_windows(tmp_path, pag
     rows.nth(0).click()
     expect(page.locator("#selected-trade")).to_contain_text("Entry 1")
     expect(page.locator("#selected-trade")).to_contain_text("$102.00")
+    expect(page.locator("#selected-trade")).to_contain_text("Buy 09:47 at $106.0000")
+    assert page.evaluate("stopLine.data().map(p => p.value)") == [102, 102]
+    assert page.evaluate("rangeLines.map(series => series.data()[0].time)") == [START + 900] * 2
     rows.nth(1).click()
     expect(page.locator("#selected-trade")).to_contain_text("Entry 2")
     expect(page.locator("#selected-trade")).to_contain_text("$103.00")
+    assert page.evaluate("stopLine.data().map(p => p.value)") == [103, 104, 104]
     page.locator("#order-select").select_option(f"{DATE}:1")
     expect(page.locator("#selected-trade")).to_contain_text("09:35–09:46")
     expect(page.locator("#selected-trade")).to_contain_text("Replaced")
+    expect(page.locator("#selected-trade")).to_contain_text("Buy stop $106.00")
     page.locator("#order-select").select_option(f"{DATE}:4")
     expect(page.locator("#selected-trade")).to_contain_text("10:11–12:00")
     expect(page.locator("#selected-trade")).to_contain_text("Canceled")
     page.locator("#run-select").select_option("both-stress")
     expect(rows).to_have_count(1)
     expect(page.locator("#summary")).to_contain_text("$100,008.00")
+    assert page.evaluate("equityLine.data().at(-1).value") == 100008
     assert not errors
