@@ -21,13 +21,8 @@ class EntrySettings:
 @dataclass(frozen=True)
 class Settings:
     starting_balance: float = 100_000
-    risk_pct: float = 0.25
     leverage: float = 4
-    entry_lookback: int = 4
-    stop_lookback: int = 4
     trail_lookback: int = 4
-    entry_atr: float = 0.25
-    stop_atr: float = 0.25
     trail_atr: float = 0.25
     tick_size: float = 0.01
     slippage_bps: float = 1
@@ -77,16 +72,8 @@ class Trade:
     initial_stop: float
     stop_updates: list[tuple[int, float]]
     gap_slippage: float
-    entry_type: str = "entry1"
-    order_id: int = 1
-
-
-@dataclass
-class DayResult:
-    status: str
-    signal_time: int | None
-    trade: Trade | None = None
-    initial_stop: float | None = None
+    entry_type: str
+    order_id: int
 
 
 def commission(shares: int, price: float) -> float:
@@ -112,90 +99,6 @@ def order_price(value: float, tick: float, *, up: bool) -> float:
 
 def slip(reference: float, cfg: Settings, multiplier: float) -> float:
     return max(cfg.slippage_floor, reference * cfg.slippage_bps / 10_000) * multiplier
-
-
-def simulate_day(
-    session: Session, bars: list[Bar], atrs: list[float | None], equity: float,
-    cfg: Settings, daily_ratio: float | None, slippage_multiplier: float,
-) -> DayResult:
-    # Indices refer to one-minute timestamps in a verified regular-session grid.
-    opening_high = max(bar.high for bar in bars[:15])
-    signal = next((i for i in range(15, min(150, len(bars)))
-                   if bars[i].close > bars[i].open and bars[i].low > opening_high), None)
-    if signal is None:
-        return DayResult("no_signal", None)
-    signal_time = bars[signal].time
-    if signal == 149:
-        return DayResult("noon_cancel", signal_time)
-    atr = atrs[signal]
-    if atr is None or signal < max(cfg.entry_lookback, cfg.stop_lookback):
-        return DayResult("warmup", signal_time)
-    entry = order_price(max(b.high for b in bars[signal - cfg.entry_lookback:signal + 1])
-                        + cfg.entry_atr * atr, cfg.tick_size, up=True)
-    initial_stop = order_price(min(b.low for b in bars[signal - cfg.stop_lookback:signal + 1])
-                               - cfg.stop_atr * atr, cfg.tick_size, up=False)
-    if not 0 < initial_stop < entry:
-        return DayResult("invalid_stop", signal_time)
-    shares = floor(min(equity * cfg.risk_pct / 100 / (entry - initial_stop), equity * cfg.leverage / entry))
-    if shares <= 0:
-        return DayResult("zero_shares", signal_time, initial_stop=initial_stop)
-
-    fill_index = next((i for i in range(signal + 1, min(150, len(bars))) if bars[i].high >= entry), None)
-    if fill_index is None:
-        return DayResult("unfilled", signal_time, initial_stop=initial_stop)
-    entry_bar = bars[fill_index]
-    entry_ref = max(entry_bar.open, entry)
-    buy_slip = slip(entry_ref, cfg, slippage_multiplier)
-    entry_price = entry_ref + buy_slip
-    # Model a buying-power cap on the actual fill when a stop gaps through its trigger.
-    shares = min(shares, floor(equity * cfg.leverage / entry_price))
-    if shares <= 0:
-        return DayResult("zero_shares", signal_time, initial_stop=initial_stop)
-
-    stop = initial_stop
-    changes = []
-    vwap = session_vwap(bars)
-    best = entry_price
-    ambiguous = False
-    exit_reason = "early_close" if len(bars) <= 210 else "time"
-    if len(bars) <= 210:
-        exit_time, exit_ref = session.close_utc, bars[-1].close
-    else:
-        exit_time, exit_ref = bars[210].time, bars[210].open
-    exit_gap = 0.0
-    for i in range(fill_index, min(210, len(bars))):
-        bar = bars[i]
-        if bar.low <= stop:
-            if i == fill_index:
-                ambiguous = bar.open < entry and bar.close > stop
-                exit_ref = stop
-            else:
-                best = max(best, bar.open)
-                exit_ref = min(bar.open, stop)
-            exit_time, exit_reason = bar.time, "stop"
-            exit_gap = stop - exit_ref
-            break
-        best = max(best, bar.high)
-        atr_now = atrs[i]
-        if (i >= cfg.trail_lookback and atr_now is not None and vwap[i] is not None
-                and bar.close < bar.open and bar.high < vwap[i]):
-            candidate = order_price(min(b.low for b in bars[i - cfg.trail_lookback:i + 1])
-                                    - cfg.trail_atr * atr_now, cfg.tick_size, up=False)
-            if candidate > stop and i + 1 < min(210, len(bars)):
-                stop = candidate
-                changes.append((bar.time + 60, stop))
-    if exit_reason != "stop":
-        best = max(best, exit_ref)
-    sell_slip = slip(exit_ref, cfg, slippage_multiplier)
-    exit_price = exit_ref - sell_slip
-    fees = commission(shares, entry_price) + commission(shares, exit_price)
-    gap_cost = (entry_ref - entry + exit_gap) * shares
-    modeled_slippage = (buy_slip + sell_slip) * shares + gap_cost
-    trade = Trade(signal_time, entry_bar.time, entry_price, exit_time, exit_price, shares,
-                  (exit_price - entry_price) * shares - fees, fees, modeled_slippage, daily_ratio,
-                  (best - entry_price) / entry_price * 100, exit_reason, ambiguous, entry,
-                  initial_stop, changes, gap_cost)
-    return DayResult("filled", signal_time, trade, initial_stop)
 
 
 @dataclass(frozen=True)
@@ -269,9 +172,10 @@ class Position:
 def replay_session(
     session: Session, bars: list[Bar], atrs: list[float | None], equity: float,
     cfg: Settings, daily_ratio: float | None, slippage_multiplier: float,
+    *, vwaps: list[float | None] | None = None,
 ) -> SessionReplay:
     opening_high = max(b.high for b in bars[:15])
-    vwap = session_vwap(bars)
+    vwap = session_vwap(bars) if vwaps is None else vwaps
     entry_deadline = min(150, len(bars))
     exit_index = min(210, len(bars))
     working = position = None

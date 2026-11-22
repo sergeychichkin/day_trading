@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from qqq_viewer.opening_range import Settings, WilderATR, commission, simulate_day
+from qqq_viewer.opening_range import Settings, WilderATR, commission, replay_session
 from qqq_viewer.sessions import Session
 from qqq_viewer.store import Bar
 
@@ -25,22 +25,23 @@ def test_wilder_atr_uses_prior_close_and_seeds_arithmetic_mean():
     assert atr.update(Bar(120, 105, 106, 104, 105, 1)) == 3
 
 
-def test_one_signal_and_entry_stop_active_after_signal_bar():
+def test_entry_stop_active_after_signal_bar():
     bars = day({15: (101, 110, 101, 105), 17: (102, 106, 101, 104), 18: (105, 109, 101, 104)})
-    result = simulate_day(SESSION, bars, [2.0] * len(bars), 100_000, CFG, None, 1.0)
-    assert result.signal_time == bars[15].time
-    assert result.status == "unfilled"
-    assert result.initial_stop == 97.5
+    result = replay_session(SESSION, bars, [2.0] * len(bars), 100_000, CFG, None, 1.0)
+    assert result.events[0].signal_time == bars[15].time
+    assert result.events[-1].action == "canceled"
+    assert not result.trades
+    assert result.events[0].initial_stop == 97.5
 
 
 def test_ambiguous_same_minute_uses_adverse_path_and_counts_costs():
     bars = day({15: (101, 103, 101, 102), 16: (102, 105, 96, 102)})
-    result = simulate_day(SESSION, bars, [2.0] * len(bars), 100_000, CFG, 1.5, 1.0)
-    trade = result.trade
+    result = replay_session(SESSION, bars, [2.0] * len(bars), 100_000, CFG, 1.5, 1.0)
+    trade = result.trades[0]
     assert trade.entry_time == trade.exit_time == bars[16].time
     assert trade.ambiguous
     assert trade.shares == 41
-    assert result.initial_stop == trade.initial_stop == 97.5
+    assert result.events[0].initial_stop == trade.initial_stop == 97.5
     assert trade.entry_price == pytest.approx(103.51035)
     assert trade.exit_price == pytest.approx(97.49)
     assert trade.pnl == pytest.approx((trade.exit_price - trade.entry_price) * 41 - 2)
@@ -49,10 +50,10 @@ def test_ambiguous_same_minute_uses_adverse_path_and_counts_costs():
 
 def test_noon_cancellation_and_forced_exit_at_one():
     late = day({149: (101, 102, 101, 102), 150: (103, 104, 103, 104)})
-    assert simulate_day(SESSION, late, [2.0] * len(late), 100_000, CFG, None, 1.0).status == "noon_cancel"
+    assert replay_session(SESSION, late, [2.0] * len(late), 100_000, CFG, None, 1.0).events[0].reason == "no_active_window"
     bars = day({15: (101, 103, 101, 102), **{i: (104, 105, 103, 104) for i in range(16, 210)},
                 210: (106, 108, 90, 92)})
-    trade = simulate_day(SESSION, bars, [2.0] * len(bars), 100_000, CFG, None, 1.0).trade
+    trade = replay_session(SESSION, bars, [2.0] * len(bars), 100_000, CFG, None, 1.0).trades[0]
     assert trade.exit_time == bars[210].time
     assert trade.exit_reason == "time"
     assert trade.exit_price == pytest.approx(105.9894)
@@ -71,7 +72,7 @@ def test_vwap_trail_activates_next_minute_and_fills_at_gap_open():
         26: (106, 106, 104, 104), 27: (103, 104, 102, 103),
     }
     bars = day(replacements)
-    trade = simulate_day(SESSION, bars, [2.0] * len(bars), 100_000, CFG, None, 1.0).trade
+    trade = replay_session(SESSION, bars, [2.0] * len(bars), 100_000, CFG, None, 1.0).trades[0]
     assert trade.stop_updates == [(bars[27].time, 103.5)]
     assert trade.exit_time == bars[27].time
     assert trade.exit_price == pytest.approx(102.9897)
