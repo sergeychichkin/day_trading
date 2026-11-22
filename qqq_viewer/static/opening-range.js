@@ -346,8 +346,9 @@ month.addEventListener("change", () => {
 });
 const table = byId("trades");
 const filter = byId("filter");
-const fields = ["number", "date", "entry_type", "entry_time", "entry_price", "exit_time", "exit_price", "shares", "pnl",
-    "commission", "slippage", "atr_close_pct", "mfe_pct"];
+const fields = ["number", "date", "entry_type", "signal_time", "entry_time", "signal_to_entry", "entry_price",
+    "exit_time", "exit_price", "shares", "pnl", "commission", "slippage", "atr_close_pct", "mfe_pct"];
+const signalToEntry = trade => trade.entry_time - trade.signal_time;
 let sortColumn = 0;
 let direction = 1;
 function selectTrade(t, row) {
@@ -391,11 +392,14 @@ function selectTrade(t, row) {
 }
 function renderTrades() {
     const field = fields[sortColumn];
-    const shown = [...tradesByKey.values()].filter(t => filter.value === "all" || (filter.value === "wins" ? t.pnl > 0 : t.pnl < 0));
+    const shown = [...tradesByKey.values()].filter(t => filter.value === "all" || t.entry_type === filter.value);
+    const sortValue = field === "signal_time" ? t => time(t.signal_time)
+        : field === "signal_to_entry" ? signalToEntry : t => t[field];
     shown.sort((a, b) => {
-        if (a[field] == null) return b[field] == null ? 0 : 1;
-        if (b[field] == null) return -1;
-        const value = typeof a[field] === "string" ? a[field].localeCompare(b[field]) : a[field] - b[field];
+        const first = sortValue(a), second = sortValue(b);
+        if (first == null) return second == null ? 0 : 1;
+        if (second == null) return -1;
+        const value = typeof first === "string" ? first.localeCompare(second) : first - second;
         return direction * value;
     });
     const body = table.tBodies[0];
@@ -404,7 +408,8 @@ function renderTrades() {
         const row = body.insertRow();
         row.dataset.order = keyOf(t.date, t.order_id);
         row.tabIndex = 0;
-        for (const value of [t.number, t.date, t.entry_type === "entry1" ? "1" : "2", time(t.entry_time), fillPrice.format(t.entry_price),
+        for (const value of [t.number, t.date, t.entry_type === "entry1" ? "1" : "2", time(t.signal_time),
+            time(t.entry_time), `${signalToEntry(t) / 60} min`, fillPrice.format(t.entry_price),
             time(t.exit_time), fillPrice.format(t.exit_price), formatCount.format(t.shares), money(t.pnl),
             money(t.commission), money(t.slippage), pct(t.atr_close_pct), pct(t.mfe_pct)]) {
             row.insertCell().textContent = value;

@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 from playwright.sync_api import expect
@@ -9,7 +10,7 @@ DATE = "2020-01-02"
 START = 1577975400
 
 
-def report_fixture(path: Path, *, tick_size=.01) -> None:
+def report_fixture(path: Path, *, tick_size=.01, timing=False) -> None:
     def stamp(i):
         return START + i * 60
 
@@ -56,8 +57,37 @@ def report_fixture(path: Path, *, tick_size=.01) -> None:
     bars = [[stamp(i), 105, 110, 100, 105, 1000, 105] for i in range(210)]
     bars[26] = [stamp(26), 105, 111, 102, 109.99, 1000, 105]
     feb = START + 32 * 86400
+    timing_days = []
+    if timing:
+        july_trades = []
+        july_events = []
+        for date, signal, fill, entry, pnl in [
+            ("2020-07-07", 40, 50, "entry2", 8),
+            ("2020-07-06", 32, 32, "entry1", -8),
+        ]:
+            start = int(datetime.fromisoformat(f"{date}T09:30:00-04:00").timestamp())
+            shift = start - START
+            order_id = 2
+            item = trade(order_id, signal, fill, fill + 3, entry, 102)
+            july_trades.append(item | dict(date=date, pnl=pnl, **{
+                key: item[key] + shift for key in ("signal_time", "entry_time", "exit_time")
+            }))
+            for action, minute in (("placed", signal), ("filled", fill)):
+                order = event(action, order_id, minute, signal, entry, 102)
+                july_events.append(order | dict(date=date, time=order["time"] + shift,
+                                                signal_time=order["signal_time"] + shift))
+            timing_days.append(dict(date=date, close=start + 210 * 60, range_high=110, range_low=100,
+                                    bars=[[bar[0] + shift, *bar[1:]] for bar in bars]))
+        # Retain only the January Entry 1 fill in the timing scenario.
+        trades[:] = [trade(2, 32, 34, 37, "entry1", 102), *july_trades]
+        events[:] = [
+            event("placed", 2, 33, 32, "entry1", 102),
+            event("filled", 2, 34, 32, "entry1", 102),
+            *sorted(july_events, key=lambda item: item["time"]),
+        ]
     write_report(path, dict(
-        ticker="QQQ", start=DATE, end=DATE, settings=dict(starting_balance=100_000, risk_pct=.25,
+        ticker="QQQ", start=DATE, end="2020-07-07" if timing else DATE,
+        settings=dict(starting_balance=100_000, risk_pct=.25,
         leverage=4, slippage_bps=1, slippage_floor=.01, tick_size=tick_size), benchmark=initial, benchmark_pct=0,
         bars=216, input_bars=216, input_sha256="fixture", sessions=3, scenarios=scenarios,
         months={
@@ -65,7 +95,8 @@ def report_fixture(path: Path, *, tick_size=.01) -> None:
                         dict(date="2020-01-03", close=START + 86400 + 180, range_high=110, range_low=100,
                              bars=[[START + 86400 + i * 60, 105, 110, 100, 105, 1000, 105] for i in range(3)])],
             "2020-02": [dict(date="2020-02-03", close=feb + 180, range_high=110, range_low=100,
-                             bars=[[feb + i * 60, 105, 110, 100, 105, 1000, 105] for i in range(3)])],
+                              bars=[[feb + i * 60, 105, 110, 100, 105, 1000, 105] for i in range(3)])],
+            **({"2020-07": sorted(timing_days, key=lambda day: day["date"])} if timing else {}),
         },
     ))
 
@@ -78,7 +109,8 @@ def test_report_selects_distinct_same_day_trades_and_order_windows(tmp_path, pag
     page.goto(path.as_uri())
     expect(page.locator("#run-select")).to_have_value("both-base")
     assert page.locator("#trades th").all_text_contents() == [
-        "Number", "Date", "Entry", "Entry Time", "Entry Price", "Exit Time", "Exit Price",
+        "Number", "Date", "Entry", "Signal Time", "Entry Time", "Signal → Entry",
+        "Entry Price", "Exit Time", "Exit Price",
         "Shares", "PnL", "Comm", "Slippage", "ATR/Close %", "MFE %",
     ]
     rows = page.locator("#trades tbody tr")
@@ -141,7 +173,8 @@ def test_rule_switch_keeps_scenario_and_month_and_refreshes_views(tmp_path, page
     assert page.locator("#trades tbody td:nth-child(3)").all_text_contents() == ["1", "2"]
     entry.click()
     assert page.locator("#trades tbody td:nth-child(3)").all_text_contents() == ["2", "1"]
-    expect(rows.first.locator("td").nth(8)).to_have_class("positive")
+    pnl_index = page.locator("#trades th").all_text_contents().index("PnL")
+    expect(rows.first.locator("td").nth(pnl_index)).to_have_class("positive")
     page.locator("#run-select").select_option("both-stress")
     expect(page.locator("#order-select option")).to_have_count(3)
     page.locator("#month").select_option("2020-02")
@@ -149,10 +182,61 @@ def test_rule_switch_keeps_scenario_and_month_and_refreshes_views(tmp_path, page
     expect(page.locator("#month")).to_have_value("2020-02")
     expect(page.locator("#run-select")).to_have_value("both-stress")
     expect(page.locator("#summary")).to_contain_text("$100,000.00")
-    expect(rows.first.locator("td")).to_have_attribute("colspan", "13")
+    expect(rows.first.locator("td")).to_have_attribute("colspan", "15")
     assert page.evaluate("equityLine.data().at(-1).value") == 100000
     page.locator("#month").select_option("2020-01")
     expect(page.locator("#order-select option")).to_have_count(1)
+
+
+def test_trade_log_sorts_signal_clock_time_and_duration(tmp_path, page):
+    path = tmp_path / "timing.html"
+    report_fixture(path, timing=True)
+    page.goto(path.as_uri())
+    headers = page.locator("#trades th")
+    assert "Signal Time" in headers.all_text_contents()
+    assert "Signal → Entry" in headers.all_text_contents()
+
+    def cells(header):
+        column = headers.all_text_contents().index(header) + 1
+        return page.locator(f"#trades tbody td:nth-child({column})").all_text_contents()
+
+    signal = page.get_by_role("columnheader", name="Signal Time", exact=True)
+    duration = page.get_by_role("columnheader", name="Signal → Entry", exact=True)
+    assert cells("Number") == ["1", "2", "3"]
+    assert cells("Signal Time") == ["10:02", "10:10", "10:02"]
+    signal.click()
+    assert cells("Number") == ["1", "3", "2"]
+    signal.press("Enter")
+    assert cells("Number") == ["2", "1", "3"]
+    duration.press("Enter")
+    assert cells("Signal → Entry") == ["0 min", "2 min", "10 min"]
+    duration.click()
+    assert cells("Signal → Entry") == ["10 min", "2 min", "0 min"]
+    page.get_by_role("columnheader", name="Entry Time", exact=True).click()
+    assert cells("Number") == ["1", "3", "2"]
+
+
+def test_trade_log_filters_by_entry_type(tmp_path, page):
+    path = tmp_path / "filter.html"
+    report_fixture(path, timing=True)
+    page.goto(path.as_uri())
+    show = page.locator("#filter")
+    numbers = page.locator("#trades tbody td:first-child")
+    order_options = page.locator("#order-select option")
+    summary = page.locator("#summary")
+    assert show.locator("option").all_text_contents() == ["All trades", "Entry 1", "Entry 2"]
+    expect(show).to_have_value("all")
+    original_orders = order_options.all_text_contents()
+    original_summary = summary.inner_text()
+    page.get_by_role("columnheader", name="Number", exact=True).click()
+    show.select_option("entry1")
+    expect(numbers).to_have_text(["3", "1"])
+    show.select_option("entry2")
+    expect(numbers).to_have_text(["2"])
+    show.select_option("all")
+    expect(numbers).to_have_text(["3", "2", "1"])
+    assert order_options.all_text_contents() == original_orders
+    assert summary.inner_text() == original_summary
 
 
 def test_rid_resets_and_visibility_persists(tmp_path, page):
