@@ -92,3 +92,12 @@ def test_stop_at_open_and_ambiguous_entry_bar_have_distinct_fills(replay):
     assert overnight.exit_price == pytest.approx(94.99)
     boundary = simulate(replay, {4: (103, 105, 102, 104)}, mode="next_session_open")
     assert boundary.trade is None and boundary.skip_reason == "next_open_unavailable"
+
+
+def test_exact_cash_boundary_is_affordable_at_submission_and_fill(replay):
+    day, bars = tape({0: (98, 99, 97, 98), 1: (98, 99, 97, 98), 2: (98, 100, 98, 99.5),
+                      3: (99.5, 100.01, 98, 99), 4: (100.01, 101, 99, 100.5)})
+    entry = replace(replay.EntrySettings(), entry_atr_buffer=0, stop_atr_buffer=0)
+    account = replace(replay.AccountSettings(), risk_pct=100, slippage_bps=0)
+    result = replay.replay_day(day, bars, [2] * len(bars), 99, 101.02, entry, account, "same_day_close")
+    assert result.trade.shares == 1 and result.trade.entry_price == 100.02

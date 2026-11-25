@@ -7,6 +7,8 @@ const stamp = new Intl.DateTimeFormat("en-US", {
     ...ny, year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
 const my = new Intl.DateTimeFormat("en-US", {...ny, year: "numeric", month: "2-digit"});
+const dayTick = new Intl.DateTimeFormat("en-US", {...ny, month: "short", day: "numeric"});
+const clockTick = new Intl.DateTimeFormat("en-US", {...ny, hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
 const timestamp = time => stamp.format(time * 1000);
 const monthAt = time => {
     const parts = Object.fromEntries(my.formatToParts(time * 1000).map(p => [p.type, p.value]));
@@ -30,7 +32,11 @@ function chart(id, priceChart = false) {
         rightPriceScale: {borderColor: "#273347"},
         crosshair: {mode: LightweightCharts.CrosshairMode.Normal},
         localization: {timeFormatter: timestamp},
-        timeScale: {borderColor: "#273347", timeVisible: priceChart, lockVisibleTimeRangeOnResize: true},
+        timeScale: {
+            borderColor: "#273347", timeVisible: priceChart, lockVisibleTimeRangeOnResize: true,
+            ...(priceChart ? {tickMarkFormatter: (time, type) =>
+                (type < 3 ? dayTick : clockTick).format(time * 1000)} : {}),
+        },
     });
 }
 

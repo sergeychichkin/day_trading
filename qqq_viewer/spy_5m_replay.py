@@ -72,12 +72,12 @@ def _decimal(value) -> Decimal:
     return Decimal(str(value))
 
 
-def _slip(reference: float, account: AccountSettings) -> float:
-    return max(account.slippage_floor, reference * account.slippage_bps / 10_000)
+def _slip(reference: float, account: AccountSettings) -> Decimal:
+    return max(_decimal(account.slippage_floor), _decimal(reference) * _decimal(account.slippage_bps) / 10_000)
 
 
-def _affordable(shares: int, price: float, budget: Decimal) -> bool:
-    return _decimal(price) * shares + _decimal(commission(shares, price)) <= budget
+def _affordable(shares: int, price: Decimal, budget: Decimal) -> bool:
+    return price * shares + _decimal(commission(shares, price)) <= budget
 
 
 def _size(trigger: float, stop: float, equity: float, account: AccountSettings) -> tuple[int, Decimal]:
@@ -85,8 +85,8 @@ def _size(trigger: float, stop: float, equity: float, account: AccountSettings) 
     budget = money * _decimal(account.cash_cap)
     risk = money * _decimal(account.risk_pct) / 100
     risk_limit = int(risk // (_decimal(trigger) - _decimal(stop)))
-    expense = trigger + _slip(trigger, account)
-    lo, hi = 0, min(risk_limit, int(budget // _decimal(expense)))
+    expense = _decimal(trigger) + _slip(trigger, account)
+    lo, hi = 0, min(risk_limit, int(budget // expense))
     while lo < hi:
         mid = (lo + hi + 1) // 2
         if _affordable(mid, expense, budget):
@@ -151,7 +151,7 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
                 continue
             at_open = fill_bar.open >= trigger
             reference = max(fill_bar.open, trigger)
-            entry_price = reference + _slip(reference, account)
+            entry_price = _decimal(reference) + _slip(reference, account)
             if not _affordable(shares, entry_price, budget):
                 events.append(OrderEvent(fill_bar.time, "rejected", "Opening gap exceeds buying power",
                                          trigger, stop, shares))
@@ -171,7 +171,7 @@ def _close(session, bars, offset, signal, bear, trigger, stop, shares, entry_pri
            entry_reference, account, exit_mode, next_open) -> Trade:
     entry_bar = bars[offset]
     ambiguous = False
-    exit_gap = 0
+    stop_gap_possible = False
     reason = "protective_stop"
     for index in range(offset, len(bars)):
         bar = bars[index]
@@ -183,20 +183,23 @@ def _close(session, bars, offset, signal, bear, trigger, stop, shares, entry_pri
                 ambiguous = entry_bar.open < trigger
             else:
                 exit_reference = min(bar.open, stop)
-                exit_gap = stop - exit_reference
+                stop_gap_possible = True
             break
     else:
         if exit_mode == "same_day_close":
             exit_time, exit_reference, reason = session.close_utc, bars[-1].close, "same_day_close"
         else:
             exit_time, exit_reference = next_open
-            exit_gap = max(0, stop - exit_reference)
+            stop_gap_possible = True
             reason = "next_session_open"
-    exit_price = exit_reference - _slip(exit_reference, account)
+    exit_raw = _decimal(exit_reference)
+    exit_price = exit_raw - _slip(exit_reference, account)
     if exit_price <= 0:
         raise ValueError("Modeled exit price is nonpositive; check the slippage settings.")
-    fees = commission(shares, entry_price) + commission(shares, exit_price)
-    return Trade(signal, bear, entry_bar.time, exit_time, trigger, stop, entry_price, exit_price, shares,
-                 (exit_price - entry_price) * shares - fees, fees,
-                 (entry_price - entry_reference + exit_reference - exit_price) * shares,
-                 (entry_reference - trigger + exit_gap) * shares, reason, ambiguous)
+    fees = _decimal(commission(shares, entry_price)) + _decimal(commission(shares, exit_price))
+    exit_gap = max(Decimal(0), _decimal(stop) - exit_raw) if stop_gap_possible else Decimal(0)
+    entry_raw = _decimal(entry_reference)
+    return Trade(signal, bear, entry_bar.time, exit_time, trigger, stop, float(entry_price), float(exit_price), shares,
+                 float((exit_price - entry_price) * shares - fees), float(fees),
+                 float((entry_price - entry_raw + exit_raw - exit_price) * shares),
+                 float((entry_raw - _decimal(trigger) + exit_gap) * shares), reason, ambiguous)

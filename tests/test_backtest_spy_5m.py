@@ -142,3 +142,51 @@ def test_unverified_optional_tail_does_not_abort_same_day_results(runner, replay
     assert len(same["trades"]) == 1 and overnight["skips"]["next_open_unavailable"] == 1
     assert result["coverage"]["next_open_tail"] is None
     assert "2025-12-01" in result["coverage"]["next_open_tail_unavailable"]
+
+
+def test_verified_next_open_beyond_published_signal_cutoff_can_close_existing_trade(runner, replay_files):
+    store, _, config = replay_files
+    with store._connection(write=True) as db:
+        db.execute("UPDATE metadata SET value='2025-11-28' WHERE key='target'")
+    friday = date(2025, 11, 28)
+    result = runner.run(runner.load_settings(config), friday, friday)
+    trade, = result["scenarios"][1]["trades"]
+    assert (trade["date"], trade["exit_date"]) == ("2025-11-28", "2025-12-01")
+    assert result["coverage"]["cache_end"] == "2025-11-28"
+    assert result["months"]["2025-12"][0]["exit_only"]
+
+
+def test_malformed_optional_tail_is_a_verification_failure(runner, replay_files):
+    store, _, config = replay_files
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open='broken' WHERE time=(SELECT MIN(time) FROM bars WHERE date='2025-12-01')")
+    friday = date(2025, 11, 28)
+    result = runner.run(runner.load_settings(config), friday, friday)
+    assert result["scenarios"][0]["stats"]["trades"] == 1
+    assert result["scenarios"][1]["skips"]["next_open_unavailable"] == 1
+    assert "2025-12-01" in result["coverage"]["next_open_tail_unavailable"]
+
+
+def test_runner_does_not_create_sidecars_beside_closed_wal_input(runner, replay_files):
+    store, _, config = replay_files
+    sidecars = [Path(str(store.path) + suffix) for suffix in ("-wal", "-shm", "-journal")]
+    assert not any(p.exists() for p in sidecars)
+    original = store.path.read_bytes()
+    runner.run(runner.load_settings(config), date(2025, 11, 28), date(2025, 11, 28))
+    assert store.path.read_bytes() == original
+    assert not any(p.exists() for p in sidecars)
+
+
+def test_input_snapshot_includes_committed_uncheckpointed_wal(runner, replay_files):
+    store, _, config = replay_files
+    friday = date(2025, 11, 28)
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET wap=100.25 WHERE time=(SELECT MIN(time) FROM bars WHERE date=?)",
+                   (friday.isoformat(),))
+        db.commit()
+        wal = Path(str(store.path) + "-wal")
+        before = wal.read_bytes()
+        assert before
+        report = runner.run(runner.load_settings(config), friday, friday)
+        assert report["months"]["2025-11"][0]["bars"][0]["vwap"] == 100.25
+        assert wal.read_bytes() == before

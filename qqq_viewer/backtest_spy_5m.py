@@ -4,15 +4,18 @@ import argparse
 import hashlib
 import json
 import math
+import shutil
 import sqlite3
 import struct
 import sys
 import tomllib
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from .opening_range import WilderATR
 from .sessions import NEW_YORK
@@ -164,11 +167,46 @@ def _verified_bars(db, session):
     ).fetchone():
         raise ValueError(f"Unverified SPY session on {day}.")
     bars = [FiveMinuteBar(*row) for row in rows]
-    if any(normalize_bar(bar) != bar or (bar.volume > 0 and bar.wap is None) for bar in bars) or not any(
-        bar.volume > 0 for bar in bars
-    ):
+    try:
+        usable = all(normalize_bar(bar) == bar and (bar.volume == 0 or bar.wap is not None) for bar in bars)
+        usable = usable and any(bar.volume > 0 for bar in bars)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Malformed SPY five-minute bar on {day}.") from exc
+    if not usable:
         raise ValueError(f"Invalid SPY bar or VWAP input on {day}.")
     return bars
+
+
+def _file_stamp(path):
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+@contextmanager
+def _input_reader(path: Path):
+    """Replay a stable local copy; SQLite may create WAL sidecars even with mode=ro."""
+    wal, journal = (Path(str(path) + suffix) for suffix in ("-wal", "-journal"))
+    sources = (path, wal, journal)
+    before = tuple(map(_file_stamp, sources))
+    if before[0] is None:
+        raise ValueError(f"SPY intraday cache not found: {path}")
+    if before[2] is not None and before[2][2]:
+        raise ValueError("SPY intraday cache has an active rollback journal; wait for the writer and retry.")
+    with TemporaryDirectory(prefix="spy-backtest-") as directory:
+        copied = Path(directory) / "intraday.sqlite3"
+        try:
+            shutil.copyfile(path, copied)
+            if before[1] is not None and before[1][2]:
+                shutil.copyfile(wal, Path(str(copied) + "-wal"))
+        except FileNotFoundError as exc:
+            raise ValueError("SPY intraday cache changed during snapshot; retry when download is idle.") from exc
+        if tuple(map(_file_stamp, sources)) != before:
+            raise ValueError("SPY intraday cache changed during snapshot; retry when download is idle.")
+        with FiveMinuteStore(copied, read_only=True)._connection() as db:
+            yield db
 
 
 def _point(points, timestamp, balance):
@@ -220,7 +258,6 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     if settings.ticker != "SPY":
         raise ValueError("The five-minute runner supports only SPY.")
     daily, daily_digest = _daily_snapshot(settings.daily_cache)
-    store = FiveMinuteStore(settings.intraday_cache, read_only=True)
     modes = [key for key in LABELS if getattr(settings, key)]
     if not modes:
         raise ValueError("Enable at least one exit.")
@@ -236,7 +273,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     tail = None
     tail_bars = None
     tail_error = None
-    with store._connection() as db:
+    with _input_reader(settings.intraday_cache) as db:
         metadata = dict(db.execute("SELECT key,value FROM metadata"))
         if metadata.get("contract") != SPY_CONTRACT or metadata.get("volume_unit") not in {"shares", "lots"}:
             raise ValueError("The intraday cache does not identify the expected SPY contract and volume unit.")
@@ -253,8 +290,9 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
         if not signal_days:
             raise ValueError("No NYSE signal sessions in the selected date range.")
         days = [session for session in calendar if session.date <= signal_days[-1].date]
-        if "next_session_open" in modes and len(days) < len(calendar):
-            candidate = calendar[len(days)]
+        if "next_session_open" in modes:
+            signal_end = signal_days[-1].date
+            candidate = sessions(signal_end + timedelta(days=1), signal_end + timedelta(days=14))[0]
             try:
                 tail_bars = _verified_bars(db, candidate)
             except ValueError as exc:

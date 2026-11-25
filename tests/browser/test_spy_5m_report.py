@@ -80,6 +80,12 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     assert "Exit" in page.evaluate("spyMarkers.map(marker => marker.text)")
     expect(page.locator("#execution")).to_contain_text("Ambiguous")
     expect(page.locator("#trades thead")).to_contain_text("Commission")
+    labels = page.evaluate("""() => {
+        const format = spyPriceChart.timeScale().options().tickMarkFormatter;
+        return [0 + Date.UTC(2025, 0, 6, 14, 30)/1000, Date.UTC(2025, 6, 7, 13, 30)/1000]
+            .map(time => format?.(time, 3, "en-US"));
+    }""")
+    assert all(label and "09:30" in label for label in labels)
 
 
 def test_report_handles_no_trades(page, replay_files, tmp_path):
