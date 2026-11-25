@@ -21,10 +21,56 @@ def test_load_legacy_and_nested_entry_settings(tmp_path):
     path.write_text('ticker = "QQQ"\ncache = "bars.db"\n[entry1]\nenabled = false\n[entry2]\nenabled = true\nrisk_pct = 0.125\n')
     _, _, nested = load_settings(path)
     assert (nested.entry1.enabled, nested.entry2.enabled) == (False, True)
+    assert nested.entry3.enabled is False
     assert nested.entry2.risk_pct == .125
     path.write_text('ticker = "QQQ"\ncache = "bars.db"\n[entry1]\nenabled = false\n[entry2]\nenabled = false\n')
     with pytest.raises(ValueError, match="enabled"):
         load_settings(path)
+
+
+@pytest.mark.parametrize("invalid", ["stop_lookback = -1", "stop_atr = -0.25",
+                                     "entry_atr = -0.25", "entry_lookback = 5",
+                                     "min_rid_bars = 0", "min_rid_bars = 26", "min_rid_bars = 2.5"])
+def test_rejects_invalid_entry3_settings(tmp_path, invalid):
+    path = tmp_path / "QQQ.toml"
+    path.write_text(f'ticker = "QQQ"\ncache = "bars.db"\n[entry3]\nenabled = true\n{invalid}\n')
+    with pytest.raises(ValueError, match=invalid.split()[0]):
+        load_settings(path)
+
+
+def test_entry3_runner_exports_shared_rid_and_keeps_scenarios_isolated(tmp_path):
+    path = tmp_path / "QQQ.toml"
+    path.write_text('ticker = "QQQ"\ncache = "bars.db"\n[entry1]\nenabled = false\n'
+                    '[entry3]\nenabled = true\nstop_lookback = 3\n')
+    _, cache, only_three = load_settings(path)
+    assert only_three.entry3.stop_lookback == 3
+    assert only_three.entry3.min_rid_bars == 3
+    store = Store(cache)
+    bars = day({0: (200, 202, 198, 200), 20: (99, 103, 98, 102),
+                21: (102, 102, 98, 99), 22: (99, 105, 98, 99)})
+    store.record_attempt(SESSION, Attempt("complete", [b.to_raw() for b in bars], request={"symbol": "QQQ"}))
+    payload = run("QQQ", store, only_three, SESSION.date, SESSION.date)
+    assert [case["id"] for case in payload["scenarios"]] == [
+        "legacy-entry3-base", "legacy-entry3-stress", "revised-entry3-base", "revised-entry3-stress",
+    ]
+    assert payload["months"]["2020-01"][0]["rid_segments"][:2] == [
+        dict(first=bars[0].time, last=bars[0].time, upper=202, lower=198),
+        dict(first=bars[1].time, last=bars[19].time, upper=100, lower=98),
+    ]
+    baseline_settings = Settings(entry2=EntrySettings())
+    baseline = run("QQQ", store, baseline_settings, SESSION.date, SESSION.date)
+    all_settings = replace(baseline_settings, entry3=only_three.entry3)
+    combined = run("QQQ", store, all_settings, SESSION.date, SESSION.date)
+    assert len(combined["scenarios"]) == 20
+    baseline_by_id = {case["id"]: case for case in baseline["scenarios"]}
+    for case in combined["scenarios"]:
+        if case["id"] in baseline_by_id:
+            prior = baseline_by_id[case["id"]]
+            expected_label = "Entries 1 and 2" if prior["entries"] == ["entry1", "entry2"] else prior["label"]
+            assert case == prior | {"label": expected_label}
+        else:
+            assert case["entries"] in (["entry3"], ["entry1", "entry2", "entry3"])
+            assert [trade["entry_type"] for trade in case["trades"]] == ["entry3"]
 
 
 def test_scenarios_and_same_day_realized_equity(tmp_path):

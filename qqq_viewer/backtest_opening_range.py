@@ -9,14 +9,16 @@ from dataclasses import asdict, replace
 from datetime import date, datetime
 from pathlib import Path
 
-from .opening_range import EntrySettings, Settings, WilderATR, replay_session, session_vwap
+from .opening_range import Entry3Settings, EntrySettings, Settings, WilderATR, replay_session, session_vwap
 from .opening_range_report import write_report
+from .rid import MAX_RID_BARS, calculate_rid
 from .sessions import NEW_YORK, Session, sessions
 from .store import BAR_COLUMNS, Bar, Store
 
 DEFAULT_START = date(2020, 1, 1)
 DEFAULT_END = date(2020, 12, 31)
 PORTABLE_BAR = struct.Struct("<q5d")
+ENTRY_KEYS = ("entry1", "entry2", "entry3")
 LEGACY_BASELINE = Path("output/QQQ_opening_range_2020-01-01_2020-12-31.html")
 
 
@@ -39,19 +41,24 @@ def load_settings(path: Path) -> tuple[str, Path, Settings]:
         raise ValueError("Use either flat entry settings in [strategy] or [entry1] and [entry2] tables.")
     entry1 = EntrySettings(**data.get("entry1", legacy))
     entry2 = EntrySettings(**({"enabled": False} | data.get("entry2", {})))
-    settings = Settings(entry1=entry1, entry2=entry2, **strategy)
-    _validate_numbers({k: v for k, v in asdict(settings).items() if k not in ("entry1", "entry2")},
+    entry3 = Entry3Settings(**({"enabled": False} | data.get("entry3", {})))
+    settings = Settings(entry1=entry1, entry2=entry2, entry3=entry3, **strategy)
+    _validate_numbers({k: v for k, v in asdict(settings).items() if k not in ENTRY_KEYS},
                       ("trail_lookback", "daily_atr_period"))
     if min(settings.starting_balance, settings.leverage, settings.tick_size, settings.daily_atr_period) <= 0:
         raise ValueError("Account size, leverage, tick size and daily ATR period must be positive.")
-    for entry in (entry1, entry2):
+    for entry in (entry1, entry2, entry3):
         values = asdict(entry)
         if type(values.pop("enabled")) is not bool:
             raise ValueError("An enabled flag must be true or false.")
-        _validate_numbers(values, ("entry_lookback", "stop_lookback"))
+        _validate_numbers(values, ("entry_lookback", "stop_lookback", "min_rid_bars"))
         if not 0 < entry.risk_pct <= 100:
             raise ValueError("Entry risk_pct must be greater than zero and at most 100.")
-    if not (entry1.enabled or entry2.enabled):
+    if entry3.entry_lookback != 4:
+        raise ValueError("Entry 3 entry_lookback must be 4.")
+    if not 1 <= entry3.min_rid_bars <= MAX_RID_BARS:
+        raise ValueError(f"Entry 3 min_rid_bars must be between 1 and {MAX_RID_BARS}.")
+    if not (entry1.enabled or entry2.enabled or entry3.enabled):
         raise ValueError("At least one entry must be enabled.")
     return ticker, (path.parent / data["cache"]).resolve(), settings
 
@@ -85,14 +92,22 @@ def output_path(ticker: str, start: date, end: date, explicit: Path | None,
 
 
 def _scenarios(cfg: Settings) -> list[tuple[dict, Settings]]:
-    e1, e2 = cfg.entry1, cfg.entry2
+    entries = {key: getattr(cfg, key) for key in ENTRY_KEYS}
+    enabled = [key for key in ENTRY_KEYS if entries[key].enabled]
     modes = []
-    if e1.enabled:
-        modes.append(("entry1", "Entry 1 only", ["entry1"], replace(cfg, entry2=replace(e2, enabled=False))))
-    if e2.enabled:
-        modes.append(("entry2", "Entry 2 only", ["entry2"], replace(cfg, entry1=replace(e1, enabled=False))))
-    if e1.enabled and e2.enabled:
-        modes.append(("both", "Both entries", ["entry1", "entry2"], cfg))
+
+    def add_mode(key: str, label: str, included: list[str]) -> None:
+        settings = replace(cfg, **{name: replace(entry, enabled=name in included)
+                                   for name, entry in entries.items()})
+        modes.append((key, label, included, settings))
+
+    for key in enabled:
+        add_mode(key, f"Entry {key[-1]} only", [key])
+    if "entry1" in enabled and "entry2" in enabled:
+        add_mode("both", "Both entries" if "entry3" not in enabled else "Entries 1 and 2",
+                 ["entry1", "entry2"])
+    if "entry3" in enabled and len(enabled) > 1:
+        add_mode("all", "All enabled entries", enabled)
     if not modes:
         raise ValueError("At least one entry must be enabled.")
     return [
@@ -205,13 +220,14 @@ def run(ticker: str, store: Store, settings: Settings, start: date, end: date) -
                 tested_count += len(bars)
                 day = session.date.isoformat()
                 vwaps = session_vwap(bars)
+                rid = calculate_rid(bars)
                 for case, cfg in cases:
                     points = case["equity"]
                     if not points:
                         _append_balance(points, session.open_utc, cfg.starting_balance)
                     balance = points[-1]["value"]
                     result = replay_session(session, bars, atrs, balance, cfg, ratio, case["slippage_multiplier"],
-                                            vwaps=vwaps, rule_version=case["rule_version"])
+                                            vwaps=vwaps, rule_version=case["rule_version"], rid=rid)
                     for trade in result.trades:
                         balance += trade.pnl
                         _append_balance(points, trade.exit_time, balance)
@@ -225,6 +241,7 @@ def run(ticker: str, store: Store, settings: Settings, start: date, end: date) -
                 months.setdefault(day[:7], []).append({
                     "date": day, "close": session.close_utc,
                     "range_high": max(highs[:15]), "range_low": min(lows[:15]),
+                    "rid_segments": [asdict(segment) for segment in rid.segments],
                     "bars": [[b.time, b.open, b.high, b.low, b.close, b.volume,
                               round(v, 5) if v is not None else None]
                              for b, v in zip(bars, vwaps)],

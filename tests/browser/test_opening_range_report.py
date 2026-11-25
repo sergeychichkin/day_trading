@@ -1,16 +1,19 @@
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
 from playwright.sync_api import expect
 
 from qqq_viewer.opening_range_report import write_report
+from qqq_viewer.rid import calculate_rid
+from qqq_viewer.store import Bar
 from tests.browser.test_viewer import page  # noqa: F401
 
 DATE = "2020-01-02"
 START = 1577975400
 
 
-def report_fixture(path: Path, *, tick_size=.01, timing=False) -> None:
+def report_fixture(path: Path, *, tick_size=.01, timing=False, entry3=False) -> None:
     def stamp(i):
         return START + i * 60
 
@@ -54,6 +57,16 @@ def report_fixture(path: Path, *, tick_size=.01, timing=False) -> None:
     scenarios = [case | dict(id=f"{version}-{case['id']}", scenario_id=case["id"], rule_version=version)
                  for version, cases in (("legacy", [base, legacy_stress]), ("revised", [base, stress]))
                  for case in cases]
+    if entry3:
+        trade3 = trades[1] | {"entry_type": "entry3"}
+        events3 = [item | {"entry_type": "entry3"} for item in events if item["order_id"] == 3]
+        scenarios.extend([
+            base | dict(id="revised-entry3-base", scenario_id="entry3-base", rule_version="revised",
+                        label="Entry 3 only", entries=["entry3"], trades=[trade3], events=events3),
+            base | dict(id="revised-all-base", scenario_id="all-base", rule_version="revised",
+                        label="All enabled entries", entries=["entry1", "entry2", "entry3"],
+                        trades=[trades[0], trade3], events=events[:3] + events3),
+        ])
     bars = [[stamp(i), 105, 110, 100, 105, 1000, 105] for i in range(210)]
     bars[26] = [stamp(26), 105, 111, 102, 109.99, 1000, 105]
     feb = START + 32 * 86400
@@ -85,19 +98,26 @@ def report_fixture(path: Path, *, tick_size=.01, timing=False) -> None:
             event("filled", 2, 34, 32, "entry1", 102),
             *sorted(july_events, key=lambda item: item["time"]),
         ]
-    write_report(path, dict(
-        ticker="QQQ", start=DATE, end="2020-07-07" if timing else DATE,
-        settings=dict(starting_balance=100_000, risk_pct=.25,
-        leverage=4, slippage_bps=1, slippage_floor=.01, tick_size=tick_size), benchmark=initial, benchmark_pct=0,
-        bars=216, input_bars=216, input_sha256="fixture", sessions=3, scenarios=scenarios,
-        months={
+    months = {
             "2020-01": [dict(date=DATE, close=stamp(210), range_high=110, range_low=100, bars=bars),
                         dict(date="2020-01-03", close=START + 86400 + 180, range_high=110, range_low=100,
                              bars=[[START + 86400 + i * 60, 105, 110, 100, 105, 1000, 105] for i in range(3)])],
             "2020-02": [dict(date="2020-02-03", close=feb + 180, range_high=110, range_low=100,
                               bars=[[feb + i * 60, 105, 110, 100, 105, 1000, 105] for i in range(3)])],
             **({"2020-07": sorted(timing_days, key=lambda day: day["date"])} if timing else {}),
-        },
+    }
+    for days in months.values():
+        for day in days:
+            rid = calculate_rid([Bar(*row[:6]) for row in day["bars"]])
+            day["rid_segments"] = [asdict(segment) for segment in rid.segments]
+    if entry3:
+        # Deliberately differ from the candle high so a browser recomputation fails.
+        months["2020-01"][0]["rid_segments"][0]["upper"] = 110.5
+    write_report(path, dict(
+        ticker="QQQ", start=DATE, end="2020-07-07" if timing else DATE,
+        settings=dict(starting_balance=100_000, risk_pct=.25,
+        leverage=4, slippage_bps=1, slippage_floor=.01, tick_size=tick_size), benchmark=initial, benchmark_pct=0,
+        bars=216, input_bars=216, input_sha256="fixture", sessions=3, scenarios=scenarios, months=months,
     ))
 
 
@@ -239,6 +259,27 @@ def test_trade_log_filters_by_entry_type(tmp_path, page):
     assert summary.inner_text() == original_summary
 
 
+def test_report_uses_supplied_rid_and_supports_entry3(tmp_path, page):
+    path = tmp_path / "entry3.html"
+    report_fixture(path, entry3=True)
+    page.goto(path.as_uri())
+    first_segment = page.evaluate("ridSegments[0]")
+    assert first_segment == dict(first=START, last=START + 24 * 60, upper=110.5, lower=100)
+    view = page.locator("#run-select")
+    expect(view.locator('option[value="entry3-base"]')).to_have_text("Entry 3 only · Base")
+    view.select_option("all-base")
+    page.locator("#filter").select_option("entry3")
+    rows = page.locator("#trades tbody tr")
+    expect(rows).to_have_count(1)
+    expect(rows.first.locator("td").nth(2)).to_have_text("3")
+    rows.first.click()
+    expect(page.locator("#selected-trade")).to_contain_text("Entry 3")
+    assert any("Entry 3" in option for option in page.locator("#order-select option").all_text_contents())
+    view.select_option("entry3-base")
+    expect(page.locator("#filter")).to_have_value("all")
+    expect(rows).to_have_count(1)
+
+
 def test_rid_resets_and_visibility_persists(tmp_path, page):
     path = tmp_path / "rid.html"
     report_fixture(path)
@@ -262,10 +303,6 @@ def test_rid_resets_and_visibility_persists(tmp_path, page):
     ]
     assert segments[-2]["last"] == START + 209 * 60
     assert segments[-1] == dict(first=START + 86400, last=START + 86400 + 120, upper=110, lower=100)
-    assert page.evaluate("""() => [200.01, 200.02, 200.009].map((close, index) => {
-        const [high, low] = index === 1 ? [201, 200.01] : [200.02, 199];
-        return ridBands([{bars: [[0, low, high, low, low], [60, low, high, low, close]]}]).length;
-    })""") == [2, 2, 1]
     toggle.uncheck()
     page.locator("#rules-select").select_option("legacy")
     expect(toggle).not_to_be_checked()

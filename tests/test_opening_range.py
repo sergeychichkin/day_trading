@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from qqq_viewer.opening_range import EntrySettings, Settings, WilderATR, commission, replay_session
+from qqq_viewer.opening_range import Entry3Settings, EntrySettings, Settings, WilderATR, commission, replay_session
 from qqq_viewer.sessions import Session
 from qqq_viewer.store import Bar
 
@@ -17,6 +17,145 @@ def day(replacements):
     for index, (opening, high, low, close) in replacements.items():
         bars[index] = Bar(bars[index].time, opening, high, low, close, 1000)
     return bars
+
+
+def test_rid_uses_prior_bounds_one_cent_tolerance_and_25_bar_limit():
+    from qqq_viewer.rid import calculate_rid
+
+    bars = day({26: (99, 101, 98, 99.99)})
+    rid = calculate_rid(bars[:27])
+    assert rid.prior_upper == (None,) + (100,) * 26
+    assert rid.prior_length == (*range(26), 1)
+    assert [(s.first, s.last, s.upper, s.lower) for s in rid.segments] == [
+        (bars[0].time, bars[24].time, 100, 98),
+        (bars[25].time, bars[25].time, 100, 98),
+        (bars[26].time, bars[26].time, 101, 98),
+    ]
+    assert calculate_rid(bars[26:27]).prior_upper == (None,)
+
+
+@pytest.mark.parametrize(("high", "low", "close", "count"), [
+    (200.02, 199, 200.01, 2),
+    (201, 200.01, 200.02, 2),
+    (200.02, 199, 200.009, 1),
+])
+def test_rid_one_cent_boundaries(high, low, close, count):
+    from qqq_viewer.rid import calculate_rid
+
+    bars = [Bar(0, low, high, low, low, 1), Bar(60, low, high, low, close, 1)]
+    assert len(calculate_rid(bars).segments) == count
+
+
+def replay_entry3(changes, *, entry=None, vwap=110, vwaps=None, missing_atr=None, cfg=None,
+                  version="revised"):
+    bars = day(changes)
+    cfg = cfg or Settings(entry1=EntrySettings(enabled=False), entry3=entry or Entry3Settings())
+    atr = [2.] * len(bars)
+    if missing_atr is not None:
+        atr[missing_atr] = None
+    result = replay_session(SESSION, bars, atr, 100_000, cfg, None, 1.,
+                            vwaps=[vwap] * len(bars) if vwaps is None else vwaps,
+                            rule_version=version)
+    return bars, result
+
+
+@pytest.mark.parametrize("version", ["legacy", "revised"])
+@pytest.mark.parametrize(("entry", "levels"), [
+    (Entry3Settings(), (105.5, 94.5)),
+    (Entry3Settings(entry_atr=.5, stop_atr=.75, stop_lookback=1), (106, 97.5)),
+])
+def test_entry3_waits_through_doji_and_repeated_breakout(version, entry, levels):
+    bars, result = replay_entry3({
+        4: (99, 103, 98, 102), 5: (100, 101, 95, 100),
+        6: (100, 105, 99, 104), 7: (104, 104, 99, 101),
+        8: (101, 108, 99, 105),
+    }, entry=entry, version=version)
+    order, fill, *rest = result.events
+    assert (order.entry_type, order.action, order.signal_time, order.time) == (
+        "entry3", "placed", bars[7].time, bars[8].time,
+    )
+    assert (order.entry_trigger, order.initial_stop) == levels
+    assert (fill.action, fill.time) == ("filled", bars[8].time)
+    assert result.trades[0].entry_type == "entry3"
+
+
+def test_entry3_stays_armed_after_doji_inside_old_range():
+    bars, result = replay_entry3({
+        4: (99, 103, 98, 102),
+        5: (99, 100, 98.5, 99),
+        6: (100, 101, 98, 99),
+    })
+    assert [(event.entry_type, event.signal_time, event.time)
+            for event in result.events if event.action == "placed"] == [
+        ("entry3", bars[6].time, bars[7].time),
+    ]
+
+
+@pytest.mark.parametrize(("reset_at", "minimum", "placed"), [
+    (3, 3, False), (2, 3, True), (2, 4, False), (3, 2, True),
+])
+def test_entry3_requires_minimum_rid_length_before_breakout(reset_at, minimum, placed):
+    _, result = replay_entry3({
+        reset_at: (95, 100, 94, 95),
+        5: (99, 103, 98, 102),
+        6: (102, 103, 98, 99),
+    }, entry=Entry3Settings(min_rid_bars=minimum))
+    assert any(event.action == "placed" for event in result.events) is placed
+
+
+@pytest.mark.parametrize(("minute", "breakout", "vwap"), [
+    (3, (99, 103, 98, 102), 110),
+    (4, (99, 103, 98, 100), 110),
+    (4, (99, 103, 98, 99.5), 110),
+    (4, (102, 103, 98, 101), 110),
+    (4, (99, 103, 98, 102), 103),
+    (4, (99, 103, 98, 102), None),
+    (25, (98.5, 103, 98, 99), 110),
+])
+def test_entry3_rejects_nonqualifying_breakout(minute, breakout, vwap):
+    _, result = replay_entry3({minute: breakout, minute + 1: (100, 101, 98, 99)}, vwap=vwap)
+    assert not result.events
+
+
+def test_entry3_consumes_warmup_signal_and_starts_fresh_each_replay():
+    bear = (100, 101, 98, 99)
+    _, result = replay_entry3({4: (99, 103, 98, 102), 5: bear, 6: bear}, missing_atr=5)
+    assert [(event.action, event.reason) for event in result.events] == [("skipped", "warmup")]
+    _, result = replay_entry3({149: (99, 103, 98, 102)})
+    assert not result.events
+    _, result = replay_entry3({4: bear})
+    assert not result.events
+
+
+def test_entry3_no_active_window_after_1159_signal():
+    bars, result = replay_entry3({148: (99, 103, 98, 102), 149: (102, 103, 98, 99)})
+    assert [(event.signal_time, event.reason) for event in result.events] == [
+        (bars[149].time, "no_active_window"),
+    ]
+
+
+def test_entry3_signal_loses_to_entry2_and_is_consumed():
+    cfg = Settings(entry1=EntrySettings(enabled=False), entry2=EntrySettings(), entry3=Entry3Settings())
+    _, result = replay_entry3({
+        4: (99, 103, 98, 102), 5: (99, 101, 98, 100), 6: (99, 101, 98, 100),
+        7: (99, 101, 98, 100), 8: (100, 101, 98, 99), 9: (100, 101, 98, 99),
+    }, cfg=cfg, version="legacy")
+    assert [(event.entry_type, event.action) for event in result.events] == [
+        ("entry2", "placed"), ("entry2", "canceled"),
+    ]
+
+
+def test_entry3_signal_during_open_position_is_not_queued():
+    cfg = Settings(entry3=Entry3Settings(), trail_lookback=0)
+    _, result = replay_entry3({
+        15: (101, 103, 101, 102), 16: (102, 104, 101, 102),
+        17: (102, 105, 101, 104), 18: (104, 105, 101, 102),
+        19: (98, 99, 96, 98), 20: (100, 101, 98, 99),
+    }, cfg=cfg)
+    assert [(event.entry_type, event.action) for event in result.events] == [
+        ("entry1", "placed"), ("entry1", "filled"),
+    ]
+    assert result.trades[0].exit_reason == "stop"
 
 
 def test_wilder_atr_uses_prior_close_and_seeds_arithmetic_mean():

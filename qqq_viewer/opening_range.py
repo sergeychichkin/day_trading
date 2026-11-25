@@ -6,6 +6,7 @@ from fractions import Fraction
 from math import ceil, floor, isfinite
 from typing import Literal
 
+from .rid import RidSession, calculate_rid
 from .sessions import Session
 from .store import Bar
 
@@ -23,6 +24,11 @@ class EntrySettings:
 
 
 @dataclass(frozen=True)
+class Entry3Settings(EntrySettings):
+    min_rid_bars: int = 3
+
+
+@dataclass(frozen=True)
 class Settings:
     starting_balance: float = 100_000
     leverage: float = 4
@@ -34,6 +40,7 @@ class Settings:
     daily_atr_period: int = 20
     entry1: EntrySettings = EntrySettings()
     entry2: EntrySettings = EntrySettings(enabled=False)
+    entry3: Entry3Settings = Entry3Settings(enabled=False)
 
 
 class WilderATR:
@@ -181,6 +188,7 @@ def replay_session(
     session: Session, bars: list[Bar], atrs: list[float | None], equity: float,
     cfg: Settings, daily_ratio: float | None, slippage_multiplier: float,
     *, vwaps: list[float | None] | None = None, rule_version: RuleVersion = "legacy",
+    rid: RidSession | None = None,
 ) -> SessionReplay:
     opening_high = max(b.high for b in bars[:15])
     vwap = session_vwap(bars) if vwaps is None else vwaps
@@ -190,6 +198,9 @@ def replay_session(
     trades, events = [], []
     next_id = 1
     revised = rule_version == "revised"
+    if cfg.entry3.enabled and rid is None:
+        rid = calculate_rid(bars)
+    entry3_armed = False
 
     for i, bar in enumerate(bars[:exit_index + 1]):
         if i == entry_deadline and working is not None:
@@ -230,6 +241,15 @@ def replay_session(
             position = None
 
         atr = atrs[i]
+        entry3_signal = False
+        if cfg.entry3.enabled and rid is not None and 4 <= i < entry_deadline:
+            if entry3_armed and bar.close < bar.open:
+                entry3_signal = True
+                entry3_armed = False
+            elif (not entry3_armed and rid.prior_length[i] >= cfg.entry3.min_rid_bars
+                  and rid.prior_upper[i] is not None and vwap[i] is not None
+                  and bar.close > bar.open and bar.close > rid.prior_upper[i] and bar.high < vwap[i]):
+                entry3_armed = True
         if position is not None:
             position.best = max(position.best, bar.high)
             bear_below_vwap = vwap[i] is not None and bar.close < bar.open and bar.high < vwap[i]
@@ -257,17 +277,20 @@ def replay_session(
               and all(b.close > b.open for b in bars[i - 4:i])
               and (not revised or any(vwap[j] is not None and bars[j].high > vwap[j] for j in (i - 1, i)))):
             entry_type, settings = "entry2", cfg.entry2
+        elif entry3_signal:
+            entry_type, settings = "entry3", cfg.entry3
         else:
             continue
 
+        entry_lookback = 4 if entry_type == "entry3" else settings.entry_lookback
         effective = bar.time + 60
         if i + 1 == entry_deadline:
             events.append(OrderEvent(effective, "skipped", entry_type, None, bar.time, reason="no_active_window"))
             continue
-        if atr is None or i < max(settings.entry_lookback, settings.stop_lookback):
+        if atr is None or i < max(entry_lookback, settings.stop_lookback):
             events.append(OrderEvent(effective, "skipped", entry_type, None, bar.time, reason="warmup"))
             continue
-        trigger = order_price(max(b.high for b in bars[i - settings.entry_lookback:i + 1])
+        trigger = order_price(max(b.high for b in bars[i - entry_lookback:i + 1])
                               + settings.entry_atr * atr, cfg.tick_size, up=True)
         stop = order_price(min(b.low for b in bars[i - settings.stop_lookback:i + 1])
                            - settings.stop_atr * atr, cfg.tick_size, up=False)

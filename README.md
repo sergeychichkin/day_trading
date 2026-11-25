@@ -47,17 +47,51 @@ The local cache covers January 2, 2020 at 09:30 through November 20, 2026 at 15:
 
 ## Opening-range backtest
 
-The command below compares Legacy and Revised rules for Entry 1, Entry 2, and both entries for QQQ using the local one-minute cache. The replay permits sequential trades, with one open position at a time. Dates are inclusive and default to January 1 through December 31, 2020.
+The command below compares Legacy and Revised rules for the enabled entries
+using the local one-minute QQQ cache. The replay permits sequential trades,
+with one open position at a time. Dates are inclusive and default to
+January 1 through December 31, 2020.
+
+To generate the report for all of 2020, run this from the repository root:
 
 ```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.backtest_opening_range
+.\.venv\Scripts\python.exe -m qqq_viewer.backtest_opening_range --config config/QQQ.toml --start 2020-01-01 --end 2020-12-31
+```
+
+For a shorter date range:
+
+```powershell
 .\.venv\Scripts\python.exe -m qqq_viewer.backtest_opening_range --config config/QQQ.toml --start 2020-02-03 --end 2020-04-30
 ```
 
-Use a TOML file per ticker and point its cache setting to the corresponding regular-session SQLite cache. In [entry1] and [entry2], set enabled to false to run the other entry alone. Each table contains its own ATR offsets, minute lookbacks, and risk percentage. The [strategy] table holds shared exits, buying power, tick size, and slippage.
+Use a TOML file per ticker and point `cache` to its regular-session SQLite
+cache. Set `enabled = false` in any entry table to exclude that entry.
+`[entry3]` is optional and disabled when omitted. Each entry has its own ATR
+multipliers and risk percentage. `[strategy]` holds the shared exits, buying
+power, tick size, and slippage.
 
-Open `output/QQQ_opening_range_rule_comparison_2020-01-01_2020-12-31.html` in a browser. With both entries enabled, each rule version has six cases across three entry combinations and two slippage assumptions. The report opens on Revised. Switching **Rules** keeps the selected case in **View**. The sortable **Entry** column shows the rule that placed the filled order. Use **RID [LazyBear]** to toggle the one-minute range bands. Select an order to inspect its working window, or select a trade to see its fills and active stop path.
+Open `output/QQQ_opening_range_rule_comparison_2020-01-01_2020-12-31.html`
+in a browser. With all three entries enabled, each rule version includes
+Entry 1 only, Entry 2 only, Entry 3 only, Entries 1 and 2, and All enabled
+entries, each with base and doubled slippage. The report opens on Revised.
+Switching **Rules** keeps the selected case in **View**. Use **Show** in the
+Executed Trades Log to filter by entry, or **RID [LazyBear]** to toggle the
+same range bands the backtest uses. Select an order to inspect its working
+window, or a trade to see its fills and active stop path.
 
-Revised Entry 2 accepts a bear candle or doji after four consecutive bullish candles. The signal or previous candle must have a high strictly above its own VWAP. For both entries, a bear candle entirely below VWAP starts a wait for the next bull candle. At that bull candle's close, the replay uses the preceding lows and configured ATR buffer to calculate a candidate stop, which applies starting on the next minute if it raises the active stop. A later bear candle can start another sequence.
+Entry 3 looks for a bullish candle from 09:34 through 11:59 New York time
+that closes strictly above the prior RID upper band with its high strictly
+below VWAP. The prior band must contain at least `min_rid_bars` completed
+candles (default 3, configurable from 1 to 25 in `[entry3]`). The breakout
+candle does not count. The first later bearish candle is the signal, even if
+price has returned inside the prior range. The buy stop is the highest high over the
+signal candle and previous four candles, plus `entry_atr × ATR(20)`. The
+initial stop is the lowest low over the signal candle and the previous
+`stop_lookback` candles, minus `stop_atr × ATR(20)`. Both multipliers
+default to 0.25 and the stop lookback defaults to four. Orders become active
+the next minute; a signal stamped 11:59 cannot place a working order before
+noon. Entry 3 uses the existing position sizing and exits.
+
+Revised Entry 2 accepts a bear candle or doji after four consecutive bullish candles. The signal or previous candle must have a high strictly above its own VWAP. Under Revised rules, for all entries, a bear candle entirely below VWAP starts a wait for the next bull candle. At that bull candle's close, the replay uses the preceding lows and configured ATR buffer to calculate a candidate stop, which applies starting on the next minute if it raises the active stop. A later bear candle can start another sequence.
 
 The replay verifies the ticker and session bounds for canonical bars and completion records. It requires complete, conflict-free sessions and uses earlier cached bars for indicator warmup only. The report records its input fingerprint and cost assumptions. Base and doubled-slippage scenarios include modeled IBKR Pro Fixed broker commissions. The additional regulatory and venue fees depend on the applicable schedule and routing and are excluded here.

@@ -50,7 +50,7 @@
     <h2 id="methods-heading">Run Details</h2>
     <p id="coverage"></p>
     <p id="execution"></p>
-    <p>Legacy uses the previous two-entry rules. Revised adds the Entry 2 doji and VWAP conditions and waits for a bullish candle before moving the stop. Both versions support order replacement and sequential trades.</p>
+    <p>Revised adds the Entry 2 doji and VWAP conditions and waits for a bullish candle before moving the stop. Entry 3, when enabled, uses the same RID breakout setup in both rule versions. Both versions support order replacement and sequential trades.</p>
     <p>Times are New York minute labels. Signal and stop updates use completed candles. ATR(20) uses one-minute true ranges and carries across regular sessions. Trade PnL already includes fill slippage and commissions. Slippage includes gaps through a stop trigger.</p>
     <p>IBKR Pro Fixed broker commission is modeled at $0.005/share per order with a $1 minimum and 1% trade-value cap. Additional regulatory and venue fees are excluded. The buy-and-hold comparison uses unleveraged price change and excludes dividends and trading costs.</p>
     <p>ATR/Close uses the previous completed session's Wilder daily ATR divided by that session's close. MFE measures the favorable price move from the entry fill and excludes unsequenced exit-minute highs. Daily ATR is blank during warmup.</p>

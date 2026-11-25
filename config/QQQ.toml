@@ -5,14 +5,14 @@ cache = "../data/qqq.sqlite3"
 starting_balance = 100000
 leverage = 4
 trail_lookback = 4
-trail_atr = 0.25
+trail_atr = 1
 tick_size = 0.01
 slippage_bps = 1
 slippage_floor = 0.01
 daily_atr_period = 20
 
 [entry1]
-enabled = true
+enabled = false
 entry_lookback = 4
 stop_lookback = 4
 entry_atr = 0.25
@@ -20,8 +20,16 @@ stop_atr = 0.25
 risk_pct = 0.25
 
 [entry2]
-enabled = true
+enabled = false
 entry_lookback = 4
+stop_lookback = 4
+entry_atr = 0.25
+stop_atr = 0.25
+risk_pct = 0.25
+
+[entry3]
+enabled = true
+min_rid_bars = 8
 stop_lookback = 4
 entry_atr = 0.25
 stop_atr = 0.25

@@ -27,7 +27,8 @@ const orderPrice = n => n == null ? "—" : priceCurrency.format(n);
 const pct = n => n == null ? "—" : n.toFixed(2) + "%";
 const byId = id => document.getElementById(id);
 
-const entryLabel = id => id === "entry1" ? "Entry 1" : "Entry 2";
+const entryNumber = {entry1: "1", entry2: "2", entry3: "3"};
+const entryLabel = id => `Entry ${entryNumber[id]}`;
 const keyOf = (date, id) => date + ":" + id;
 const rulesSelect = byId("rules-select");
 const runSelect = byId("run-select");
@@ -209,27 +210,6 @@ candles.attachPrimitive({
     }],
 });
 
-function ridBands(days) {
-    const segments = [];
-    for (const day of days) {
-        let current = null;
-        let length = 0;
-        for (const [time, , high, low, close] of day.bars) {
-            // Allow for binary rounding at the strict one-cent boundary.
-            const tolerance = 0.01 + Math.abs(close) * Number.EPSILON;
-            if (current && length < 25 && close < current.upper - tolerance && close > current.lower + tolerance) {
-                current.last = time;
-                length += 1;
-            } else {
-                current = {first: time, last: time, upper: high, lower: low};
-                segments.push(current);
-                length = 1;
-            }
-        }
-    }
-    return segments;
-}
-
 candles.attachPrimitive({
     attached({requestUpdate}) { requestRidUpdate = requestUpdate; },
     paneViews: () => [{
@@ -292,7 +272,7 @@ function showMonth(key) {
     signalStops = new Map();
     orderSelect.replaceChildren(new Option("Select an order", ""));
     const days = run.months[key];
-    ridSegments = ridBands(days);
+    ridSegments = days.flatMap(day => day.rid_segments);
     opens = days.map(day => day.bars[0][0]);
     const bars = [], vols = [], markers = [];
     for (const day of days) {
@@ -346,6 +326,9 @@ month.addEventListener("change", () => {
 });
 const table = byId("trades");
 const filter = byId("filter");
+if (run.scenarios.some(item => item.entries.includes("entry3"))) {
+    filter.add(new Option(entryLabel("entry3"), "entry3"));
+}
 const fields = ["number", "date", "entry_type", "signal_time", "entry_time", "signal_to_entry", "entry_price",
     "exit_time", "exit_price", "shares", "pnl", "commission", "slippage", "atr_close_pct", "mfe_pct"];
 const signalToEntry = trade => trade.entry_time - trade.signal_time;
@@ -408,7 +391,7 @@ function renderTrades() {
         const row = body.insertRow();
         row.dataset.order = keyOf(t.date, t.order_id);
         row.tabIndex = 0;
-        for (const value of [t.number, t.date, t.entry_type === "entry1" ? "1" : "2", time(t.signal_time),
+        for (const value of [t.number, t.date, entryNumber[t.entry_type], time(t.signal_time),
             time(t.entry_time), `${signalToEntry(t) / 60} min`, fillPrice.format(t.entry_price),
             time(t.exit_time), fillPrice.format(t.exit_price), formatCount.format(t.shares), money(t.pnl),
             money(t.commission), money(t.slippage), pct(t.atr_close_pct), pct(t.mfe_pct)]) {
