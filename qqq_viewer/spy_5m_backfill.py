@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import sys
+from contextlib import suppress
 from datetime import datetime, timezone
 from itertools import groupby
 from pathlib import Path
@@ -14,10 +15,11 @@ from ib_async.wrapper import RequestError
 
 from .sessions import NEW_YORK, Session
 from .spy_5m_store import DEFAULT_DB, FiveMinuteBar, FiveMinuteStore, completed, expected_times, normalize_bar
+from .spy_5m_view import price_basis_mismatch
 from .spy_daily import DEFAULT_CACHE
 from .tws import ContractIdentity, TwsHistory, classify_error
 
-STOP = {"disconnected", "entitlement", "pacing"}
+STOP = {"disconnected", "entitlement", "pacing", "broker_error"}
 LISTINGS = {"ARCA", "NYSE ARCA", "NYSEARCA"}
 
 
@@ -53,22 +55,32 @@ class SpyHistory(TwsHistory):
         contract = Stock("SPY", "SMART", "USD", conId=self.identity.con_id,
                          primaryExchange=self.identity.primary_exchange)
         end = datetime.fromtimestamp(sessions[-1].close_utc, timezone.utc).strftime("%Y%m%d-%H:%M:%S")
-        timeout = 25 if duration == "1 D" else 75
+        timeout = self.timeout_seconds if duration == "1 D" else max(75, self.timeout_seconds)
+        api, wrapper = self._ib.client, self._ib.wrapper
+        request_id = api.getReqId()
+        bars = []
+        future = wrapper.startReq(request_id, contract, container=bars)
+        status, diagnostic = "complete", ""
         try:
-            bars = util.run(self._ib.reqHistoricalDataAsync(
-                contract, endDateTime=end, durationStr=duration, barSizeSetting="5 mins",
-                whatToShow="TRADES", useRTH=True, formatDate=2, keepUpToDate=False, timeout=timeout,
-            ), timeout=timeout + 5)
+            api.reqHistoricalData(request_id, contract, end, duration, "5 mins", "TRADES", 1, 2, False, [])
+            util.run(future, timeout=timeout)
         except TimeoutError:
-            return "timeout", [], f"No complete SPY response within {timeout} seconds."
+            status, diagnostic = "timeout", f"No complete SPY response within {timeout:g} seconds."
+            if api.isReady():
+                with suppress(OSError):
+                    api.cancelHistoricalData(request_id)
         except RequestError as exc:
-            return classify_error(exc.code, exc.message), [], f"TWS {exc.code}: {exc.message}"
+            status, diagnostic = classify_error(exc.code, exc.message), f"TWS {exc.code}: {exc.message}"
         except OSError as exc:
-            return "disconnected", [], str(exc)
+            status, diagnostic = "disconnected", str(exc)
+        finally:
+            wrapper._endReq(request_id)
         result = [FiveMinuteBar(int(bar.date.timestamp()), bar.open, bar.high, bar.low, bar.close,
                                 bar.volume, bar.average) for bar in bars
                   if isinstance(bar.date, datetime) and bar.date.utcoffset() is not None]
-        return ("complete", result, "") if result else ("empty", [], "TWS returned no usable five-minute timestamps.")
+        if status == "complete" and not result:
+            return "empty", [], "TWS returned no usable five-minute timestamps."
+        return status, result, diagnostic
 
 
 def _by_session(window, bars):
@@ -99,13 +111,14 @@ def _probe_window(store, client, window, duration, label):
     else:
         observed = {}
     usable = {}
-    if status == "complete":
-        for session, rows in sample.items():
-            grid = expected_times(session)
-            by_time = {bar.time: bar for bar in rows if bar.time in grid}
-            if len(by_time) == len(grid) and all(bar.volume == 0 or bar.wap is not None for bar in by_time.values()):
-                if any(bar.volume > 0 for bar in by_time.values()):
-                    usable[session] = [by_time[time] for time in grid]
+    for session, rows in sample.items():
+        if session in pending and status != "complete":
+            continue
+        grid = expected_times(session)
+        by_time = {bar.time: bar for bar in rows if bar.time in grid}
+        if len(by_time) == len(grid) and all(bar.volume == 0 or bar.wap is not None for bar in by_time.values()):
+            if any(bar.volume > 0 for bar in by_time.values()):
+                usable[session] = [by_time[time] for time in grid]
     print(f"{label} probe: {len(usable)}/{len(window)} usable sessions; "
           f"{sum(len(rows) for rows in sample.values()):,} accepted bars ({status})"
           f"{': ' + diagnostic if diagnostic else ''}.", flush=True)
@@ -128,10 +141,8 @@ def _price_check(daily_cache, samples):
                    for value in (opening, close)):
             continue
         overlaps += 1
-        a, b = rows[0].open / opening, rows[-1].close / close
-        # Ignore normal venue/auction differences; flag a common scale factor
-        # more than 5% from parity when open and close agree within 1%.
-        if min(abs(a - 1), abs(b - 1)) > 0.05 and abs(a / b - 1) <= 0.01:
+        if ratios := price_basis_mismatch(rows[0].open, rows[-1].close, row):
+            a, b = ratios
             return "", f"TWS/Yahoo price-basis mismatch on {session.date}: open ×{a:.3f}, close ×{b:.3f}."
     if not overlaps:
         return "Yahoo comparison unavailable (no overlapping usable daily bars).", None
@@ -163,13 +174,13 @@ def run_backfill(store: FiveMinuteStore, client, now: datetime, *, volume_unit: 
         return summary()
 
     old_sample, old_rows, old_status, old_diag = _probe_window(store, client, jan, "1 W", "January 2000")
-    if not old_sample:
+    if old_status in STOP or not old_sample:
         return summary(f"January 2000 probe: {old_status}; {old_diag or 'no complete usable sessions'}")
     if recent[0] in jan and recent[0] in old_sample:
         new_sample, new_rows, new_status, new_diag = {recent[0]: old_sample[recent[0]]}, {}, "complete", ""
     else:
         new_sample, new_rows, new_status, new_diag = _probe_window(store, client, recent, "1 D", "Recent")
-    if not new_sample:
+    if new_status in STOP or not new_sample:
         return summary(f"Recent probe: {new_status}; {new_diag or 'no complete usable sessions'}")
     price_check, mismatch = _price_check(daily_cache, old_sample | new_sample)
     if mismatch:
@@ -193,12 +204,10 @@ def run_backfill(store: FiveMinuteStore, client, now: datetime, *, volume_unit: 
               f"{' — ' + diagnostic if diagnostic else ''}", flush=True)
         if status in STOP:
             return summary(f"{window[0].date}: {status}; {diagnostic}")
-        if status == "broker_error":
-            return summary(f"{window[0].date}: {status}; {diagnostic}")
         for session in store.pending(window):
             status, bars, diagnostic = client.request([session], "1 D")
             store.record(session, status, bars, diagnostic)
-            if status in STOP or status == "broker_error":
+            if status in STOP:
                 return summary(f"{session.date}: {status}; {diagnostic}")
     return summary()
 

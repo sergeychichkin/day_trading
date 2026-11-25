@@ -132,8 +132,11 @@ function drawMonth(data) {
     if (counts.unverified_sessions) parts.push(`${counts.unverified_sessions} unverified sessions`);
     if (counts.conflicting) parts.push(`${counts.conflicting} conflicting bars`);
     if (data.through) parts.push(`Checked through ${data.through}`);
-    parts.push(data.daily_status === "available" ? "Levels: SPY daily snapshot" : "Daily levels unavailable");
-    status(parts.join(" · "), counts.missing || counts.unverified_sessions || counts.conflicting ? "incomplete" : "");
+    const mismatch = data.daily_status === "price_mismatch";
+    parts.push(mismatch ? "Daily levels hidden on sessions with a different price scale"
+        : data.daily_status === "available" ? "Levels: SPY daily snapshot" : "Daily levels unavailable");
+    status(parts.join(" · "), mismatch || counts.missing || counts.unverified_sessions || counts.conflicting
+        ? "incomplete" : "");
 
     if (firstSession === null) {
         setEmpty("No cached SPY five-minute bars for this month.");

@@ -155,7 +155,8 @@ class FiveMinuteStore:
                        "ON CONFLICT(date) DO UPDATE SET completed=max(completed, excluded.completed)",
                        (key, int(status == "complete" and accepted > 0)))
             valid = len(existing) == len(grid) and all(row[5] == 0 or row[6] is not None for row in existing.values())
-            db.execute("UPDATE sessions SET verified=completed AND ? WHERE date=?", (int(valid), key))
+            if status == "complete" and accepted:
+                db.execute("UPDATE sessions SET verified=? WHERE date=?", (int(valid), key))
 
     def _verified(self, db):
         return {row[0] for row in db.execute("SELECT date FROM sessions WHERE verified=1")}

@@ -87,3 +87,15 @@ def test_store_rejects_qqq_or_incompatible_metadata(intraday, tmp_path):
         store.configure(123, "lots")
     with pytest.raises(ValueError, match="contract"):
         store.configure(456, "shares")
+
+
+def test_timeout_cannot_promote_a_session_to_verified(intraday, tmp_path):
+    store = intraday.FiveMinuteStore(tmp_path / "spy.db")
+    session = regular(intraday)
+    store.configure(123, "shares")
+    bars = bars_for(intraday, session)
+    store.record(session, "complete", bars[:-1])
+    store.record(session, "timeout", bars[-1:])
+    assert store.pending([session]) == [session]
+    store.record(session, "complete", bars)
+    assert store.pending([session]) == []

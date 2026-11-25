@@ -33,19 +33,19 @@ def test_spy_history_requests_native_rth_trade_bars(module, monkeypatch):
         assert (contract.symbol, contract.exchange, contract.currency) == ("SPY", "SMART", "USD")
         return [SimpleNamespace(contract=symbol)]
 
-    async def request(contract, **options):
+    def request(req_id, contract, end, duration, size, kind, rth, format_date, streaming, _):
         assert (contract.conId, contract.primaryExchange) == (756733, "ARCA")
-        assert options["endDateTime"] == "20000103-21:00:00"
-        assert (options["durationStr"], options["barSizeSetting"], options["whatToShow"]) == (
-            "1 D", "5 mins", "TRADES",
+        assert (end, duration, size, kind, rth, format_date, streaming) == (
+            "20000103-21:00:00", "1 D", "5 mins", "TRADES", 1, 2, False,
         )
-        assert (options["useRTH"], options["formatDate"], options["keepUpToDate"]) == (True, 2, False)
-        assert options["timeout"] == 25
-        return [BarData(datetime.fromtimestamp(session.open_utc, timezone.utc),
-                        100, 102, 99, 101, 50, 100.75, 9)]
+        history._ib.wrapper.historicalData(req_id, BarData(
+            str(session.open_utc), 100, 102, 99, 101, 50, 100.75, 9,
+        ))
+        history._ib.wrapper.historicalDataEnd(req_id, "", "")
 
     monkeypatch.setattr(history._ib, "reqContractDetailsAsync", details)
-    monkeypatch.setattr(history._ib, "reqHistoricalDataAsync", request)
+    monkeypatch.setattr(history._ib.client, "getReqId", lambda: 9)
+    monkeypatch.setattr(history._ib.client, "reqHistoricalData", request)
     contract = history.qualify_spy()
     status, rows, _ = history.request([session], "1 D")
     assert status == "complete" and rows[0].wap == 100.75
@@ -116,6 +116,37 @@ def test_recent_probe_failure_stops_before_bulk(module, tmp_path):
     result = run(module, store, client, tmp_path)
     assert "Recent" in result["diagnostic"] and "no recent data" in result["diagnostic"]
     assert len(client.requests) == 2
+
+
+def test_cached_january_sample_survives_an_empty_retry(module, tmp_path):
+    store = FiveMinuteStore(tmp_path / "spy.db")
+    first = completed(NOW)[0]
+    store.configure(756733, "shares")
+    store.record(first, "complete", bars_for(module, first))
+    client = FakeHistory(module)
+    client.download = lambda window: (("empty", [], "no additional January rows")
+                                      if len(client.requests) == 1 else client.success(window))
+    result = run(module, store, client, tmp_path)
+    assert result["diagnostic"] == ""
+    assert result["missing"] == 0
+
+
+def test_historical_deadline_cancels_the_broker_request(module, monkeypatch):
+    session = completed(NOW)[0]
+    history = module.SpyHistory(7497, 42, min_interval=0)
+    history.identity = ContractIdentity(756733, "ARCA")
+    history.timeout_seconds = 0.02
+    api = history._ib.client
+    cancelled = []
+    monkeypatch.setattr(api, "isReady", lambda: True)
+    monkeypatch.setattr(api, "getReqId", lambda: 9)
+    monkeypatch.setattr(api, "reqHistoricalData", lambda *args: None)
+    monkeypatch.setattr(api, "cancelHistoricalData", cancelled.append)
+    run_original = module.util.run
+    monkeypatch.setattr(module.util, "run", lambda task, timeout: run_original(task, timeout=min(timeout, 0.03)))
+    status, rows, diagnostic = history.request([session], "1 D")
+    assert status == "timeout" and rows == [] and "seconds" in diagnostic
+    assert cancelled == [9]
 
 
 @pytest.mark.parametrize("multiplier", [0.5, 1.001, None])

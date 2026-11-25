@@ -33,10 +33,21 @@ def _daily_levels(path):
     except (OSError, ValueError, KeyError, TypeError):
         return {}, "unreadable"
 
-    def level(value):
-        return value if type(value) in (int, float) and math.isfinite(value) else None
+    return {row["time"]: row for row in rows}, "available"
 
-    return {row["time"]: (level(row.get("upper")), level(row.get("lower"))) for row in rows}, "available"
+
+def _number(value):
+    return value if type(value) in (int, float) and math.isfinite(value) else None
+
+
+def price_basis_mismatch(opening: float, close: float, daily: dict) -> tuple[float, float] | None:
+    daily_open, daily_close = _number(daily.get("open")), _number(daily.get("close"))
+    if not daily_open or not daily_close or daily_open < 0 or daily_close < 0:
+        return None
+    a, b = opening / daily_open, close / daily_close
+    # Ignore normal venue/auction differences; require a common factor
+    # more than 5% from parity with open and close agreeing within 1%.
+    return (a, b) if min(abs(a - 1), abs(b - 1)) > 0.05 and abs(a / b - 1) <= 0.01 else None
 
 
 def _add_vwap(session):
@@ -62,7 +73,16 @@ def month_payload(store: FiveMinuteStore, daily_cache: Path, month: str) -> dict
     rows = data["sessions"]
     daily, status = _daily_levels(daily_cache)
     for session in rows:
-        session["upper"], session["lower"] = daily.get(session["date"], (None, None))
+        row = daily.get(session["date"], {})
+        bars = session["bars"]
+        mismatch = (bars and bars[0]["time"] == session["open_utc"]
+                    and bars[-1]["time"] + STEP == session["close_utc"]
+                    and price_basis_mismatch(bars[0]["open"], bars[-1]["close"], row))
+        if mismatch:
+            session["upper"] = session["lower"] = None
+            status = "price_mismatch"
+        else:
+            session["upper"], session["lower"] = _number(row.get("upper")), _number(row.get("lower"))
         _add_vwap(session)
     expected = sum((row["close_utc"] - row["open_utc"]) // STEP for row in rows)
     received = sum(len(row["bars"]) for row in rows)

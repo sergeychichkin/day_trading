@@ -99,3 +99,20 @@ def test_intraday_api_routes_and_month_bounds(spy_files):
             with pytest.raises(HTTPError) as error:
                 urlopen(url + "/api/spy/5m/month/" + month)
             assert error.value.code == 400
+
+
+def test_price_scale_mismatch_in_replaced_daily_snapshot_hides_only_affected_levels(spy_files):
+    from qqq_viewer.spy_5m_view import month_payload
+
+    store, daily, (first, second, _) = spy_files
+    payload = json.loads(daily.read_bytes())
+    payload["bars"][0].update(open=100, close=101)
+    payload["bars"][1].update(open=50, close=50.5)
+    daily.write_text(json.dumps(payload), encoding="utf-8")
+    month = month_payload(store, daily, "2025-11")
+    by_day = {row["date"]: row for row in month["sessions"]}
+    assert month["daily_status"] == "price_mismatch"
+    assert by_day[first.date.isoformat()]["upper"] == 110.123456
+    affected = by_day[second.date.isoformat()]
+    assert (affected["upper"], affected["lower"]) == (None, None)
+    assert affected["bars"][0]["vwap"] == 100.5
