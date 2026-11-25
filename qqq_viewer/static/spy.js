@@ -40,11 +40,7 @@ const volumeOptions = {priceFormat: {type: "volume"}, priceScaleId: "volume"};
 const quiet = {lastValueVisible: false, priceLineVisible: false};
 const lineOptions = {...quiet, lineWidth: 2, crosshairMarkerVisible: false};
 const volume = chart.addHistogramSeries({...quiet, ...volumeOptions});
-const sma = chart.addLineSeries({...lineOptions, ...volumeOptions, color: blue});
 chart.priceScale("volume").applyOptions({scaleMargins: {top: 0.78, bottom: 0.02}});
-const ema = chart.addLineSeries({...lineOptions, color: emaColors.neutral});
-const upper = chart.addLineSeries({...lineOptions, color: upperColor});
-const lower = chart.addLineSeries({...lineOptions, color: lowerColor});
 
 function showLegend(bar) {
     document.querySelector("#legend-time").textContent = bar ? dateFormat.format(new Date(bar.time)) : "—";
@@ -92,10 +88,25 @@ function showMonth() {
     ].filter(Boolean).join(" · ");
 }
 
-function lineData(bars, field, colorFor) {
-    return bars.flatMap(bar => bar[field] == null ? [] : [{
-        time: bar.time, value: bar[field], ...(colorFor ? {color: colorFor(bar)} : {}),
-    }]);
+function plotLine(bars, field, options, colorFor) {
+    let run = [];
+    function finishRun() {
+        // This chart library connects points within one series even across gaps.
+        if (run.length) chart.addLineSeries({...lineOptions, ...options}).setData(run);
+        run = [];
+    }
+    bars.forEach((bar, index) => {
+        if (bar[field] == null) {
+            finishRun();
+            return;
+        }
+        const point = {time: bar.time, value: bar[field]};
+        const next = bars[index + 1];
+        // Point colors apply to the outgoing segment, whose slope is recorded on the next bar.
+        if (colorFor) point.color = colorFor(next?.[field] == null ? bar : next);
+        run.push(point);
+    });
+    finishRun();
 }
 
 async function load() {
@@ -126,10 +137,10 @@ async function load() {
         volume.setData(bars.map(bar => ({
             time: bar.time, value: bar.volume, color: (bar.close >= bar.open ? green : red) + "80",
         })));
-        sma.setData(lineData(bars, "volume_sma_20"));
-        ema.setData(lineData(bars, "ema_20", bar => emaColors[bar.ema_direction]));
-        upper.setData(lineData(bars, "upper"));
-        lower.setData(lineData(bars, "lower"));
+        plotLine(bars, "volume_sma_20", {...volumeOptions, color: blue});
+        plotLine(bars, "ema_20", {color: emaColors.neutral}, bar => emaColors[bar.ema_direction]);
+        plotLine(bars, "upper", {color: upperColor});
+        plotLine(bars, "lower", {color: lowerColor});
 
         monthPicker.value = bars.at(-1).time.slice(0, 7);
         monthPicker.max = through.slice(0, 7);
