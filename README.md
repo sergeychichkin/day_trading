@@ -30,6 +30,20 @@ Full runs request at most one calendar month per block and retry incomplete sess
 
 Open [the local QQQ viewer](http://127.0.0.1:8765/). The viewer can run as the backfill progresses and works after TWS is closed. Reload the page to refresh month availability. The coverage line shows received and expected regular-session minutes for the selected month and flags gaps and conflicts. Scheduled closures and early closes use the exchange calendar. Overnight and weekend gaps are compressed on the chart.
 
+## SPY daily viewer
+
+Install the project dependencies, download the data, then start the same local server. SPY does not require TWS.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m qqq_viewer.spy_daily
+.\.venv\Scripts\python.exe -m qqq_viewer.server --port 8765
+```
+
+Open [the SPY daily viewer](http://127.0.0.1:8765/spy). The Month picker jumps to a month; drag the chart to pan into adjacent months. The price chart shows the close EMA(20) and two levels fixed at each day's open, based on the previous 10 sessions' average percentage moves from open to high and open to low. Volume and its SMA(20) share the lower area.
+
+The downloader uses Yahoo Finance daily OHLCV without dividend adjustment, from January 2000 through the last completed US regular session. It prints missing NYSE session dates and writes `data/spy_daily.json`. Rerun the downloader to refresh the snapshot, and reload the page. The viewer reads locally and does not need internet access to display a downloaded snapshot.
+
 ## Verify
 
 ```powershell

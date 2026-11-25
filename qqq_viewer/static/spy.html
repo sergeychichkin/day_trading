@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SPY · Daily</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script defer src="/static/vendor/lightweight-charts.js"></script>
+    <script defer src="/static/spy.js"></script>
+</head>
+<body>
+    <main>
+        <header class="toolbar">
+            <div class="instrument">
+                <h1>SPY</h1>
+                <p>Daily <span>·</span> Regular session <span>·</span> Yahoo Finance</p>
+            </div>
+            <label class="month-picker" for="month">Month <input id="month" type="month" min="2000-01" disabled></label>
+        </header>
+        <section class="panel" aria-label="SPY daily price and volume chart">
+            <div class="legend">
+                <span id="legend-time">—</span>
+                <dl>
+                    <div><dt>O</dt><dd id="legend-open">—</dd></div>
+                    <div><dt>H</dt><dd id="legend-high">—</dd></div>
+                    <div><dt>L</dt><dd id="legend-low">—</dd></div>
+                    <div><dt>C</dt><dd id="legend-close">—</dd></div>
+                    <div><dt>EMA 20</dt><dd id="legend-ema_20">—</dd></div>
+                    <div><dt>Upper 10</dt><dd id="legend-upper">—</dd></div>
+                    <div><dt>Lower 10</dt><dd id="legend-lower">—</dd></div>
+                    <div><dt>Volume</dt><dd id="legend-volume">—</dd></div>
+                    <div class="sma"><dt>Volume SMA 20</dt><dd id="legend-volume_sma_20">—</dd></div>
+                </dl>
+            </div>
+            <div class="chart-body">
+                <div id="chart"></div>
+                <div id="empty" hidden></div>
+            </div>
+            <footer>
+                <p id="coverage" role="status">Loading SPY history…</p>
+                <a href="/">QQQ viewer</a>
+                <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">Charts by TradingView</a>
+            </footer>
+        </section>
+    </main>
+</body>
+</html>

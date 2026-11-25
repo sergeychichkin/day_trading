@@ -10,11 +10,14 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .sessions import NEW_YORK, START_DATE, sessions
+from .spy_daily import DEFAULT_CACHE as SPY_CACHE
 from .store import BAR_COLUMNS, Bar, Store
 
 STATIC = Path(__file__).with_name("static")
 ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
+    "/spy": ("spy.html", "text/html; charset=utf-8"),
+    "/static/spy.js": ("spy.js", "application/javascript; charset=utf-8"),
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
     "/static/chart.js": ("chart.js", "application/javascript; charset=utf-8"),
     "/static/vendor/lightweight-charts.js": ("vendor/lightweight-charts.js", "application/javascript"),
@@ -105,7 +108,7 @@ def month_payload(store: Store, month: str) -> dict:
     }
 
 
-def make_server(db_path: Path, port: int) -> ThreadingHTTPServer:
+def make_server(db_path: Path, port: int, *, spy_cache: Path = SPY_CACHE) -> ThreadingHTTPServer:
     store = Store(db_path, read_only=True)
 
     class Handler(BaseHTTPRequestHandler):
@@ -135,6 +138,13 @@ def make_server(db_path: Path, port: int) -> ThreadingHTTPServer:
                     self.json(200, month_index(store))
                 elif path.startswith("/api/month/"):
                     self.json(200, month_payload(store, path.removeprefix("/api/month/")))
+                elif path == "/api/spy/daily":
+                    try:
+                        snapshot = spy_cache.read_bytes()
+                    except FileNotFoundError:
+                        self.json(200, {"bars": [], "missing_sessions": [], "through": None})
+                    else:
+                        self.respond(200, "application/json; charset=utf-8", snapshot)
                 else:
                     self.json(404, {"error": "Page not found."})
             except ValueError as exc:
@@ -147,12 +157,14 @@ def make_server(db_path: Path, port: int) -> ThreadingHTTPServer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serve the local QQQ one-minute viewer.")
+    parser = argparse.ArgumentParser(description="Serve the local QQQ and SPY chart viewers.")
     parser.add_argument("--db", type=Path, default=Path("data/qqq.sqlite3"))
+    parser.add_argument("--spy-cache", type=Path, default=SPY_CACHE)
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    with make_server(args.db, args.port) as server:
+    with make_server(args.db, args.port, spy_cache=args.spy_cache) as server:
         print(f"QQQ viewer at http://127.0.0.1:{server.server_port}/", flush=True)
+        print(f"SPY viewer at http://127.0.0.1:{server.server_port}/spy", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
