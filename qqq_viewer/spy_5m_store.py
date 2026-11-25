@@ -66,6 +66,16 @@ class FiveMinuteBar:
     wap: float | None
 
 
+def normalize_bar(bar: FiveMinuteBar) -> FiveMinuteBar | None:
+    values = astuple(bar)
+    if (not all(math.isfinite(value) for value in values[1:6])
+            or not 0 < bar.low <= min(bar.open, bar.close) <= max(bar.open, bar.close) <= bar.high
+            or bar.volume < 0):
+        return None
+    wap = bar.wap if bar.wap is not None and math.isfinite(bar.wap) and bar.wap > 0 else None
+    return FiveMinuteBar(*values[:6], wap)
+
+
 def _metadata(db, key):
     row = db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
     return row[0] if row else None
@@ -126,14 +136,10 @@ class FiveMinuteStore:
         with self._connection(write=True) as db:
             existing = {row[0]: row for row in db.execute(f"SELECT {BAR_FIELDS} FROM bars WHERE date=?", (key,))}
             for bar in bars:
-                values = astuple(bar)
-                if (bar.time not in grid or not all(math.isfinite(value) for value in values[1:6])
-                        or not 0 < bar.low <= min(bar.open, bar.close) <= max(bar.open, bar.close) <= bar.high
-                        or bar.volume < 0):
+                if bar.time not in grid or (bar := normalize_bar(bar)) is None:
                     continue
                 accepted += 1
-                wap = bar.wap if bar.wap is not None and math.isfinite(bar.wap) and bar.wap > 0 else None
-                values = (*values[:6], wap)
+                values, wap = astuple(bar), bar.wap
                 old = existing.get(bar.time)
                 if old is None:
                     db.execute("INSERT INTO bars VALUES (?,?,?,?,?,?,?,?)", (*values, key))
