@@ -10,6 +10,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .sessions import NEW_YORK, START_DATE, sessions
+from . import spy_5m_view
+from .spy_5m_store import DEFAULT_DB as SPY_5M_DB, FiveMinuteStore
 from .spy_daily import DEFAULT_CACHE as SPY_CACHE
 from .store import BAR_COLUMNS, Bar, Store
 
@@ -17,7 +19,9 @@ STATIC = Path(__file__).with_name("static")
 ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/spy": ("spy.html", "text/html; charset=utf-8"),
+    "/spy/5m": ("spy-5m.html", "text/html; charset=utf-8"),
     "/static/spy.js": ("spy.js", "application/javascript; charset=utf-8"),
+    "/static/spy-5m.js": ("spy-5m.js", "application/javascript; charset=utf-8"),
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
     "/static/chart.js": ("chart.js", "application/javascript; charset=utf-8"),
     "/static/vendor/lightweight-charts.js": ("vendor/lightweight-charts.js", "application/javascript"),
@@ -108,8 +112,10 @@ def month_payload(store: Store, month: str) -> dict:
     }
 
 
-def make_server(db_path: Path, port: int, *, spy_cache: Path = SPY_CACHE) -> ThreadingHTTPServer:
+def make_server(db_path: Path, port: int, *, spy_cache: Path = SPY_CACHE,
+                spy_5m_db: Path = SPY_5M_DB) -> ThreadingHTTPServer:
     store = Store(db_path, read_only=True)
+    spy_intraday = FiveMinuteStore(spy_5m_db, read_only=True)
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, status: int, content_type: str, body: bytes):
@@ -138,6 +144,11 @@ def make_server(db_path: Path, port: int, *, spy_cache: Path = SPY_CACHE) -> Thr
                     self.json(200, month_index(store))
                 elif path.startswith("/api/month/"):
                     self.json(200, month_payload(store, path.removeprefix("/api/month/")))
+                elif path == "/api/spy/5m/months":
+                    self.json(200, spy_5m_view.month_index(spy_intraday))
+                elif path.startswith("/api/spy/5m/month/"):
+                    month = path.removeprefix("/api/spy/5m/month/")
+                    self.json(200, spy_5m_view.month_payload(spy_intraday, spy_cache, month))
                 elif path == "/api/spy/daily":
                     try:
                         snapshot = spy_cache.read_bytes()
@@ -160,11 +171,13 @@ def main():
     parser = argparse.ArgumentParser(description="Serve the local QQQ and SPY chart viewers.")
     parser.add_argument("--db", type=Path, default=Path("data/qqq.sqlite3"))
     parser.add_argument("--spy-cache", type=Path, default=SPY_CACHE)
+    parser.add_argument("--spy-5m-db", type=Path, default=SPY_5M_DB)
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    with make_server(args.db, args.port, spy_cache=args.spy_cache) as server:
+    with make_server(args.db, args.port, spy_cache=args.spy_cache, spy_5m_db=args.spy_5m_db) as server:
         print(f"QQQ viewer at http://127.0.0.1:{server.server_port}/", flush=True)
         print(f"SPY viewer at http://127.0.0.1:{server.server_port}/spy", flush=True)
+        print(f"SPY five-minute viewer at http://127.0.0.1:{server.server_port}/spy/5m", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

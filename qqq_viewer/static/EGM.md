@@ -32,3 +32,10 @@ generated HTML.
 
 - From the repository root: `.\.venv\Scripts\python.exe -m pytest -q`.
   Browser tests require a supported browser as described in `../../README.md`.
+
+## SPY five-minute view
+
+`spy-5m.html` and `spy-5m.js` use the five-minute month index and payload.
+They display UTC data in New York time, show missing candle slots rather than
+filling them, and draw separate VWAP and daily level lines for each session.
+The month selection counter prevents older responses from changing the view.

@@ -32,3 +32,10 @@ that produce standalone HTML reports. See `README.md` for setup and CLI usage.
 
 - Run `.\.venv\Scripts\python.exe -m pytest -q` from the repository root.
   Install test dependencies and a supported browser as described in `README.md`.
+
+## SPY five-minute boundary
+
+SPY five-minute acquisition reads regular-hours IBKR trade bars into a separate
+SQLite cache from January 2000. The local `/spy/5m` viewer reads that cache for
+price and session VWAP and the SPY daily snapshot for session levels. Neither
+source is written by the chart server. The downloader uses no order endpoints.

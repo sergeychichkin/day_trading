@@ -109,3 +109,19 @@ noon. Entry 3 uses the existing position sizing and exits.
 Revised Entry 2 accepts a bear candle or doji after four consecutive bullish candles. The signal or previous candle must have a high strictly above its own VWAP. Under Revised rules, for all entries, a bear candle entirely below VWAP starts a wait for the next bull candle. At that bull candle's close, the replay uses the preceding lows and configured ATR buffer to calculate a candidate stop, which applies starting on the next minute if it raises the active stop. A later bear candle can start another sequence.
 
 The replay verifies the ticker and session bounds for canonical bars and completion records. It requires complete, conflict-free sessions and uses earlier cached bars for indicator warmup only. The report records its input fingerprint and cost assumptions. Base and doubled-slippage scenarios include modeled IBKR Pro Fixed broker commissions. The additional regulatory and venue fees depend on the applicable schedule and routing and are excluded here.
+
+## SPY five-minute viewer
+
+Open TWS with socket clients enabled. Use the port and volume unit configured in TWS; the example below uses port `7497` and volume in shares. The download sends historical data and contract requests only.
+
+```powershell
+.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_backfill --port 7497 --volume-unit shares --probe
+.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_backfill --port 7497 --volume-unit shares
+.\.venv\Scripts\python.exe -m qqq_viewer.server --port 8765
+```
+
+Run the second command only if the probe passes. It starts at the first NYSE session in January 2000 and can resume without requesting already verified sessions. It writes `data/spy_5m.sqlite3`. If using custom paths, match the downloader's `--db` to the server's `--spy-5m-db`, and match the downloader's `--daily-cache` to the server's `--spy-cache`.
+
+Open [the separate five-minute viewer](http://127.0.0.1:8765/spy/5m). The Month picker opens the first cached session; drag horizontally to browse the selected month. The purple line is session VWAP, using IBKR's five-minute weighted prices and volume. A missing bar or unavailable weighted price on a positive-volume bar stops VWAP until the next open. The amber and blue lines copy the SPY daily upper and lower levels by New York session date. The coverage footer separates missing bars, unverified sessions, and conflicting values. The viewer uses local files and works with TWS closed.
+
+**Live probe on November 25, 2026:** TWS qualified SPY as contract `756733` (ARCA) and returned all 78 five-minute bars with positive volume and weighted prices for November 24, 2026. A browser check using a temporary cache displayed this session's VWAP and both levels from the daily snapshot. The January 3–7, 2000 weekly probe and a separate January 3 one-day request both returned error 162 (“HMDS query returned no data”). TWS's head timestamp of January 29, 1993 is not specific to five-minute bars. The bulk backfill was not started and no substitute start date was used.

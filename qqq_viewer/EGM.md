@@ -49,3 +49,15 @@ backtest reports.
 ## Verification
 
 - From the repository root: `.\.venv\Scripts\python.exe -m pytest -q`.
+
+## SPY five-minute interfaces
+
+- `spy_5m_backfill.py` qualifies SPY, probes old and recent data, requests
+  bounded TWS history, and resumes unverified NYSE sessions.
+- `spy_5m_store.py` owns the independent SQLite schema and NYSE 300-second
+  grid. UTC bars retain broker WAP. A duplicate may fill missing WAP but
+  cannot replace accepted values; conflicting revised bars are flagged.
+- `spy_5m_view.py` builds month payloads for `/api/spy/5m/months` and
+  `/api/spy/5m/month/<YYYY-MM>`. VWAP resets at the open and is unavailable
+  after a gap or unusable positive-volume WAP. `upper` and `lower` come from
+  the SPY daily JSON, joined on exchange-local date without rescaling.

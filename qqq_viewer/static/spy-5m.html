@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SPY · 5 minutes</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script defer src="/static/vendor/lightweight-charts.js"></script>
+    <script defer src="/static/spy-5m.js"></script>
+</head>
+<body>
+    <main>
+        <header class="toolbar">
+            <div class="instrument">
+                <h1>SPY</h1>
+                <p>5 minutes <span>·</span> Regular session <span>·</span> New York time</p>
+            </div>
+            <label class="month-picker" for="month">Month <input id="month" type="month" min="2000-01" disabled></label>
+        </header>
+        <section class="panel" aria-label="SPY five-minute chart">
+            <div class="legend">
+                <div><span id="legend-time">—</span> <span id="legend-conflict" hidden>Conflicting bar</span></div>
+                <dl>
+                    <div><dt>O</dt><dd id="legend-open">—</dd></div>
+                    <div><dt>H</dt><dd id="legend-high">—</dd></div>
+                    <div><dt>L</dt><dd id="legend-low">—</dd></div>
+                    <div><dt>C</dt><dd id="legend-close">—</dd></div>
+                    <div><dt>Volume</dt><dd id="legend-volume">—</dd></div>
+                    <div class="vwap"><dt>Session VWAP</dt><dd id="legend-vwap">—</dd></div>
+                    <div><dt>Daily upper</dt><dd id="legend-upper">—</dd></div>
+                    <div><dt>Daily lower</dt><dd id="legend-lower">—</dd></div>
+                </dl>
+            </div>
+            <div class="chart-body">
+                <div id="chart"></div>
+                <div id="empty" hidden></div>
+            </div>
+            <footer>
+                <p id="coverage" role="status">Loading SPY five-minute history…</p>
+                <a href="/spy">SPY daily viewer</a>
+                <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">Charts by TradingView</a>
+            </footer>
+        </section>
+    </main>
+</body>
+</html>
