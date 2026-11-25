@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>{{CSS}}
+    button { font: inherit; color: inherit; background: #172335; border: 1px solid #3c4c63; border-radius: 5px; padding: 3px 7px; cursor: pointer; }
+    button:focus-visible { outline: 2px solid #70b9ee; }
+    #orders { min-width: 770px; }
+    .toolbar { flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<main>
+<header>
+    <h1>Five-Minute Entry 1 Backtest <span id="ticker"></span></h1>
+    <p id="parameters"></p>
+</header>
+<section aria-labelledby="summary-heading">
+    <div class="toolbar"><h2 id="summary-heading">Executive Performance Summary</h2>
+        <label>Exit scenario <select id="scenario"></select></label></div>
+    <div id="summary">
+        <div class="card">Ending equity<strong id="ending-equity"></strong></div>
+        <div class="card">Net P&amp;L<strong id="net-pnl"></strong></div>
+        <div class="card">Trades<strong id="trade-count"></strong></div>
+        <div class="card">Max drawdown<strong id="max-drawdown"></strong></div>
+    </div>
+    <div class="scroll"><table id="scenarios">
+        <thead><tr><th>Scenario</th><th>Trades</th><th>Net P&amp;L</th><th>Return</th><th>Max drawdown</th>
+            <th>Win rate</th><th>Commission</th><th>Slippage</th><th>Gap impact</th><th>Ambiguous</th></tr></thead>
+        <tbody></tbody>
+    </table></div>
+</section>
+<section aria-labelledby="equity-heading">
+    <h2 id="equity-heading">Equity and Drawdown</h2>
+    <p class="key"><span class="base" id="selected-equity"></span><span class="benchmark">Buy and hold, price only</span></p>
+    <div id="equity"></div><p class="muted">Closed-balance drawdown</p><div id="drawdown"></div>
+</section>
+<section id="trade-chart" aria-labelledby="chart-heading">
+    <div class="toolbar"><h2 id="chart-heading">Price, Levels and Trades</h2><label>Month <select id="month"></select></label></div>
+    <p class="key"><span class="signal">Daily upper · Bull signal</span><span class="benchmark">Daily lower</span>
+        <span class="stress">Session VWAP</span><span class="negative">Dashed protective stop</span></p>
+    <p id="chart-legend"></p><div id="price"></div><p id="selected-trade" class="muted"></p>
+</section>
+<section aria-labelledby="trades-heading">
+    <h2 id="trades-heading">Executed Trades Log</h2>
+    <p class="muted">Select an entry or exit to inspect that session. Intrabar fills use the containing candle's start time.</p>
+    <div class="scroll"><table id="trades">
+        <thead><tr><th>Entry session</th><th>Signal candle</th><th>Entry time</th><th>Entry fill</th><th>Trigger</th>
+            <th>Stop</th><th>Exit time</th><th>Exit fill</th><th>Exit reason</th><th>Shares</th><th>Net P&amp;L</th>
+            <th>Commission</th><th>Slippage</th><th>Gap impact</th><th>Ambiguous</th><th>Chart</th></tr></thead>
+        <tbody></tbody>
+    </table></div>
+</section>
+<section aria-labelledby="orders-heading">
+    <h2 id="orders-heading">Order Events</h2><p class="muted" id="event-month"></p>
+    <div class="scroll"><table id="orders">
+        <thead><tr><th>Event time</th><th>Action</th><th>Detail</th><th>Trigger</th><th>Stop</th><th>Shares</th></tr></thead>
+        <tbody></tbody>
+    </table></div>
+</section>
+<section aria-labelledby="details-heading">
+    <h2 id="details-heading">Run Details</h2>
+    <p id="coverage"></p><p id="skips"></p><p id="execution"></p>
+    <p>IBKR Pro Fixed uses $0.005 per share per executed order, a $1 minimum and a 1% trade-value cap.
+       Venue and regulatory fees are excluded. Net P&amp;L already reflects opening gaps, adverse slippage and commissions;
+       the cost columns are not additional deductions. The benchmark excludes trading costs and dividends.</p>
+    <details><summary>Settings and input fingerprints</summary><pre id="provenance"></pre></details>
+</section>
+<footer><a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">Charts by TradingView</a></footer>
+</main>
+<script id="report-data" type="application/json">{{PAYLOAD}}</script>
+<script>{{LIBRARY}}</script>
+<script>{{SCRIPT}}</script>
+</body>
+</html>

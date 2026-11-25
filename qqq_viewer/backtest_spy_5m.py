@@ -234,6 +234,8 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     benchmark_open = None
     warmup_bars = signal_bars = 0
     tail = None
+    tail_bars = None
+    tail_error = None
     with store._connection() as db:
         metadata = dict(db.execute("SELECT key,value FROM metadata"))
         if metadata.get("contract") != SPY_CONTRACT or metadata.get("volume_unit") not in {"shares", "lots"}:
@@ -252,12 +254,18 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
             raise ValueError("No NYSE signal sessions in the selected date range.")
         days = [session for session in calendar if session.date <= signal_days[-1].date]
         if "next_session_open" in modes and len(days) < len(calendar):
-            tail = calendar[len(days)]
-            days.append(tail)
+            candidate = calendar[len(days)]
+            try:
+                tail_bars = _verified_bars(db, candidate)
+            except ValueError as exc:
+                tail_error = str(exc)
+            else:
+                tail = candidate
+                days.append(tail)
         bars = _verified_bars(db, days[0])
         for i, session in enumerate(days):
             following = days[i + 1] if i + 1 < len(days) else None
-            next_bars = _verified_bars(db, following) if following else None
+            next_bars = (tail_bars if following == tail else _verified_bars(db, following)) if following else None
             for bar in bars:
                 digest.update(BAR_FINGERPRINT.pack(bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume,
                                                    bar.wap if bar.wap is not None else 0, bar.wap is not None))
@@ -313,7 +321,8 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
         "coverage": {"start": signal_days[0].date.isoformat(), "end": signal_days[-1].date.isoformat(),
                      "cache_start": published_start, "cache_end": published_end, "signal_sessions": len(signal_days),
                      "signal_bars": signal_bars, "warmup_bars": warmup_bars,
-                     "next_open_tail": tail.date.isoformat() if tail else None, "volume_unit": metadata["volume_unit"]},
+                     "next_open_tail": tail.date.isoformat() if tail else None, "volume_unit": metadata["volume_unit"],
+                     **({"next_open_tail_unavailable": tail_error} if tail_error else {})},
     }
 
 

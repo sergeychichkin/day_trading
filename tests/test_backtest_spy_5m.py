@@ -130,3 +130,15 @@ def test_run_refuses_unverified_warmup_or_signal_input(runner, replay_files, dam
             db.execute("INSERT INTO conflicts SELECT time,date FROM bars ORDER BY time LIMIT 1")
     with pytest.raises(ValueError, match="Incomplete|Conflicting"):
         runner.run(runner.load_settings(config), date(2025, 11, 28), date(2025, 11, 28))
+
+
+def test_unverified_optional_tail_does_not_abort_same_day_results(runner, replay_files):
+    store, _, config = replay_files
+    with store._connection(write=True) as db:
+        db.execute("INSERT INTO conflicts SELECT time,date FROM bars WHERE date='2025-12-01' LIMIT 1")
+    friday = date(2025, 11, 28)
+    result = runner.run(runner.load_settings(config), friday, friday)
+    same, overnight = result["scenarios"]
+    assert len(same["trades"]) == 1 and overnight["skips"]["next_open_unavailable"] == 1
+    assert result["coverage"]["next_open_tail"] is None
+    assert "2025-12-01" in result["coverage"]["next_open_tail_unavailable"]

@@ -125,3 +125,18 @@ Run the second command only if the probe passes. It starts at the first NYSE ses
 Open [the separate five-minute viewer](http://127.0.0.1:8765/spy/5m). The Month picker opens the first cached session; drag horizontally to browse the selected month. The purple line is session VWAP, using IBKR's five-minute weighted prices and volume. A missing bar or unavailable weighted price on a positive-volume bar stops VWAP until the next open. The amber and blue lines copy the SPY daily upper and lower levels by New York session date. If the chart detects a price-scale mismatch after a daily refresh, it hides the affected levels and shows a warning; candles and VWAP remain available. The coverage footer separates missing bars, unverified sessions, and conflicting values. The viewer uses local files and works with TWS closed.
 
 **Live probe on November 25, 2026:** TWS qualified SPY as contract `756733` (ARCA) and returned all 78 five-minute bars with positive volume and weighted prices for November 24, 2026. A browser check using a temporary cache displayed this session's VWAP and both levels from the daily snapshot. The January 3–7, 2000 weekly probe and a separate January 3 one-day request both returned error 162 (“HMDS query returned no data”). TWS's head timestamp of January 29, 1993 is not specific to five-minute bars. The bulk backfill was not started and no substitute start date was used.
+
+## SPY five-minute Entry 1 backtest
+
+Run the replay from the repository root with the verified intraday cache and SPY daily levels already installed. It reads both locally; TWS does not need to be open. The default backtest uses the full published range and creates a separate standalone HTML report under `output/`.
+
+```powershell
+.\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml
+.\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml --entry1-start-time 09:35 --entry1-end-time 10:00 --start 2020-01-01 --end 2020-12-31 --output output/SPY_5m_2020_0935-1000.html
+```
+
+[`config/SPY.toml`](config/SPY.toml) controls the entry window, the two ATR buffers, the order lifetime, equity and risk, and execution costs. Signal times label five-minute candle **starts**, in New York time. Only the first qualifying bull close can arm a setup; the first later bear can occur after the signal window. At the bear close the runner fixes the buy trigger and protective stop from the information available then, including the low so far, before allowing a fill on the next bar. The order cannot survive its expiry or the regular-session close.
+
+To compare same-day close and next-session open, copy the TOML alongside the original, enable `next_session_open` in `[exits]`, and give the run a distinct `--output`. Each enabled exit compounds independently. A next-open exit can use the verified opening just beyond `--end`; if there is no next verified session, that final day is excluded from next-open entries. The report states the actual signal range and any exit-only date. Existing reports are not overwritten.
+
+The backtest uses whole shares, 1% planned risk and a cash cap by default. It charges modeled IBKR Pro Fixed commissions and configurable adverse slippage. Gap moves and five-minute path ambiguity are modeled separately; planned risk is not a guaranteed maximum loss. The report includes scenario results, equity and drawdown, a price-only buy-and-hold benchmark, session charts, and order and trade logs.
