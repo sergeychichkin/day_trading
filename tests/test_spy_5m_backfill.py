@@ -149,6 +149,35 @@ def test_historical_deadline_cancels_the_broker_request(module, monkeypatch):
     assert cancelled == [9]
 
 
+def test_wrapper_drops_partial_buffer_after_broker_error(module, monkeypatch):
+    session = completed(NOW)[0]
+    history = module.SpyHistory(7497, 42, min_interval=0)
+    history.identity = ContractIdentity(756733, "ARCA")
+    api, wrapper = history._ib.client, history._ib.wrapper
+    monkeypatch.setattr(api, "isReady", lambda: True)
+    monkeypatch.setattr(api, "getReqId", lambda: 9)
+
+    def request(req_id, *_):
+        wrapper.historicalData(req_id, BarData(str(session.open_utc), 100, 102, 99, 101, 50, 100.75, 9))
+        wrapper.error(req_id, 162, "HMDS query returned no data", "")
+
+    monkeypatch.setattr(api, "reqHistoricalData", request)
+    status, rows, _ = history.request([session], "1 D")
+    assert (status, len(rows)) == ("empty", 1)
+    assert 9 not in wrapper._results
+
+
+def test_legacy_january_downloader_cannot_target_the_published_cache(module, tmp_path):
+    store = FiveMinuteStore(tmp_path / "spy.db")
+    store.set_target(completed(NOW)[0].date)
+    with store._connection(write=True) as db:
+        db.execute("INSERT INTO metadata VALUES ('verified_contiguous_start','2000-01-03')")
+    client = FakeHistory(module)
+    with pytest.raises(ValueError, match="spy_5m_contiguous"):
+        run(module, store, client, tmp_path)
+    assert not client.requests
+
+
 @pytest.mark.parametrize("multiplier", [0.5, 1.001, None])
 def test_systematic_price_basis_mismatch_blocks_backfill(module, tmp_path, multiplier):
     store = FiveMinuteStore(tmp_path / "spy.db")

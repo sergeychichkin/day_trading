@@ -60,6 +60,20 @@ def test_spy_month_picker_and_indicator_series(page, snapshot):
         picker.fill("2000-02")
         expect(page.locator("#legend-time")).to_contain_text("Feb 1, 2000")
         expect(page.locator("#legend-upper")).to_have_text("104.00")
+        page.wait_for_function("""
+            () => {
+                const r = chartUnderTest.timeScale().getVisibleRange();
+                return r?.from === "2000-02-01" && r?.to === "2000-02-01";
+            }
+        """, timeout=2500)
+        page.get_by_role("button", name="Show adjacent sessions").click()
+        page.wait_for_function("""
+            () => chartUnderTest.timeScale().getVisibleRange()?.from === "2000-01-31"
+        """, timeout=2500)
+        page.get_by_role("button", name="Show only selected session").click()
+        page.wait_for_function("""
+            () => chartUnderTest.timeScale().getVisibleRange()?.from === "2000-02-01"
+        """, timeout=2500)
         picker.fill("2000-01")
         expect(page.locator("#legend-time")).to_contain_text("Jan 31, 2000")
         picker.fill("2000-03")
@@ -73,6 +87,86 @@ def test_spy_missing_cache_explains_how_to_download(page, tmp_path):
         page.goto(f"{url}/spy")
         expect(page.locator("#month")).to_be_disabled()
         expect(page.locator("#empty")).to_contain_text("qqq_viewer.spy_daily")
+        expect(page.locator("#empty")).to_contain_text("--cache")
+        expect(page.locator("#empty")).to_contain_text("--spy-cache")
+
+
+def test_spy_warns_about_uncached_tail_from_another_month(page, snapshot):
+    cache, payload = snapshot
+    payload.update(through="2000-05-02", missing_sessions=["2000-05-01", "2000-05-02"])
+    cache.write_text(json.dumps(payload), encoding="utf-8")
+    with running_spy_server(cache) as url:
+        page.goto(f"{url}/spy")
+        expect(page.locator("#month")).to_have_value("2000-04")
+        expect(page.locator("#coverage")).to_contain_text("2 missing after last bar")
+        expect(page.locator("#coverage")).to_contain_text("Last bar 2000-04-04")
+        expect(page.locator("#coverage")).to_have_attribute("data-status", "incomplete")
+        page.locator("#month").fill("2000-05")
+        expect(page.locator("#empty")).to_contain_text("No cached bars")
+        expect(page.locator("#coverage")).to_contain_text("0 / 2 sessions")
+
+
+def test_spy_month_jump_restores_price_autoscaling(page, snapshot):
+    cache, payload = snapshot
+    for bar in payload["bars"][2:]:
+        for field in ("open", "high", "low", "close", "ema_20", "lower", "upper"):
+            bar[field] += 500
+    cache.write_text(json.dumps(payload), encoding="utf-8")
+    capture_series(page)
+    with running_spy_server(cache) as url:
+        page.goto(f"{url}/spy")
+        expect(page.locator("#month")).to_have_value("2000-04")
+        page.wait_for_function('chartUnderTest.timeScale().getVisibleRange()?.from === "2000-04-03"')
+        page.evaluate("chartUnderTest.priceScale('right').applyOptions({autoScale: false})")
+        assert not page.evaluate("chartUnderTest.priceScale('right').options().autoScale")
+        page.locator("#month").fill("2000-02")
+        expect(page.locator("#legend-time")).to_contain_text("Feb 1, 2000")
+        assert page.evaluate("chartUnderTest.priceScale('right').options().autoScale")
+
+
+def test_spy_price_axis_drag_cannot_push_candles_into_volume(page, snapshot):
+    cache, _ = snapshot
+    capture_series(page)
+    with running_spy_server(cache) as url:
+        page.goto(f"{url}/spy")
+        page.wait_for_function('chartUnderTest.timeScale().getVisibleRange()?.from === "2000-04-03"')
+        chart = page.locator("#chart").bounding_box()
+        before = page.evaluate("seriesUnderTest[0].priceToCoordinate(104)")
+        x = chart["x"] + chart["width"] - 15
+        y = chart["y"] + 180
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 250, steps=12)
+        page.mouse.up()
+        assert page.evaluate("chartUnderTest.priceScale('right').options().autoScale")
+        assert page.evaluate("seriesUnderTest[0].priceToCoordinate(104)") == before
+
+
+def test_spy_historical_view_hides_full_history_price_marker(page, snapshot):
+    cache, _ = snapshot
+    capture_series(page)
+    with running_spy_server(cache) as url:
+        page.goto(f"{url}/spy")
+        expect(page.locator("#month")).to_have_value("2000-04")
+        page.locator("#month").fill("2000-02")
+        expect(page.locator("#legend-time")).to_contain_text("Feb 1, 2000")
+        latest = page.evaluate("""() => {
+            const {priceLineVisible, lastValueVisible} = seriesUnderTest[0].options();
+            return [priceLineVisible, lastValueVisible];
+        }""")
+        assert latest == [False, False]
+
+
+def test_spy_keeps_selected_month_in_view_when_window_narrows(page, snapshot):
+    cache, payload, days = april_bars(snapshot)
+    cache.write_text(json.dumps(payload), encoding="utf-8")
+    capture_series(page)
+    with running_spy_server(cache) as url:
+        page.goto(f"{url}/spy")
+        page.wait_for_function('chartUnderTest.timeScale().getVisibleRange()?.from === "2000-04-03"')
+        page.set_viewport_size({"width": 660, "height": 820})
+        page.wait_for_function("chartUnderTest.timeScale().width() < 660", timeout=2500)
+        assert page.evaluate("chartUnderTest.timeScale().getVisibleRange()") == {"from": days[0], "to": days[-1]}
 
 
 def capture_strokes(page):

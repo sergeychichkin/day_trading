@@ -2,6 +2,12 @@
 
 ## Intent
 
+The original January 2000 bulk start below did not pass the live TWS probe.
+The delivered workflow instead publishes the earliest uninterrupted range
+through the requested completed NYSE session, and refreshes it without
+crossing a gap. See the [dated coverage record](../../spy-5m-coverage.md)
+for the measured start and operating commands.
+
 Make it possible to compare intraday SPY price and regular-session VWAP with the two levels already shown on the daily chart. Start the history at January 1, 2000 (first expected NYSE session: January 3). The coverage target is the latest NYSE regular session that has closed when the run starts, even if TWS has not returned that session yet. Do not change the existing SPY daily or QQQ viewers, place orders, or imply that incomplete history has been verified.
 
 ## Approaches
@@ -19,9 +25,9 @@ Make it possible to compare intraday SPY price and regular-session VWAP with the
 
 ## Chart and calculations
 
-- The separate page uses the same native Month picker, starting at January 2000 and defaulting to the latest month with cached bars. Load the selected month, open at its first cached session with that session in view, and allow horizontal panning within the month. Mark session boundaries and show the selected month’s coverage, including missing or unverified data.
+- The separate page uses the same native Month picker, restricted to the published range and defaulting to the latest month with cached bars. Load the selected month, open at its first cached session with that session in view, and allow horizontal panning within the month. Mark session boundaries and count coverage only inside the published range; identify any outstanding requested cutoff separately.
 - Show SPY five-minute candlesticks and session VWAP. Compute VWAP as the running sum of `bar WAP × bar volume` divided by running volume, starting from the regular-session open. A zero-volume bar contributes no weight; there is no VWAP before positive cumulative volume. Do not substitute OHLC averages for broker WAP. If an expected bar is missing or a positive-volume bar has unusable WAP, omit VWAP from that point to the end of the session. Restart cleanly at the next session open.
-- By New York session date, read `upper` and `lower` directly from the existing SPY daily snapshot. Plot each value as a horizontal line from the session open to its close, without drawing across overnight gaps. They are the daily chart's exact levels, not percentages reapplied to the first intraday candle. Leave unavailable levels blank and identify the daily snapshot as their source. If the current daily snapshot and the cached first and last bars demonstrate a price-basis mismatch, hide that session's levels with a warning and retain its candles and VWAP.
+- By New York session date, read `upper` and `lower` directly from the existing SPY daily snapshot. Plot each as a horizontal line from the session open to its close, without drawing across overnight gaps. These are exact values, not percentages reapplied to the first intraday candle. As a SPY sanity check, accept upper levels from 100% to 200% of its daily open and lower levels from 50% to 100%. Reject bad values individually. Hide levels when the first or last bar is missing or their price basis cannot be verified. Explain the selected session's level status without removing its candles or VWAP.
 - The crosshair shows New York date and time, OHLCV, VWAP, and the daily levels. Render missing bars as gaps. The page explains how to populate an absent intraday cache and still shows intraday bars if the daily snapshot is absent.
 
 ## Verification

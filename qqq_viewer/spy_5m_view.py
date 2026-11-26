@@ -12,14 +12,18 @@ MONTH = re.compile(r"\d{4}-(?:0[1-9]|1[0-2])", flags=re.ASCII)
 
 
 def month_index(store: FiveMinuteStore) -> dict:
-    latest = store.latest_date()
-    through = store.target_end_date()
+    bounds = store.bounds()
+    latest = bounds["latest"]
+    through = bounds["published_through"] or bounds["target"]
     months = []
-    current = START
-    while through and current <= through:
+    current = date.fromisoformat(bounds["published_start"]).replace(day=1) if bounds["published_start"] else START
+    last = date.fromisoformat(through).replace(day=1) if through else None
+    while last and current <= last:
         months.append(current.strftime("%Y-%m"))
+        if current == last:
+            break
         current = (current.replace(day=28) + timedelta(days=4)).replace(day=1)
-    return {"months": months, "default_month": latest.strftime("%Y-%m") if latest else None}
+    return {"months": months, "default_month": latest[:7] if latest else None}
 
 
 def _daily_levels(path):
@@ -36,18 +40,57 @@ def _daily_levels(path):
     return {row["time"]: row for row in rows}, "available"
 
 
-def _number(value):
-    return value if type(value) in (int, float) and math.isfinite(value) else None
+def _positive_price(value):
+    try:
+        return value if type(value) in (int, float) and math.isfinite(value) and value > 0 else None
+    except OverflowError:
+        return None
+
+
+def daily_price_pair(daily: dict) -> tuple[float, float] | None:
+    opening, close = _positive_price(daily.get("open")), _positive_price(daily.get("close"))
+    return (opening, close) if opening is not None and close is not None else None
 
 
 def price_basis_mismatch(opening: float, close: float, daily: dict) -> tuple[float, float] | None:
-    daily_open, daily_close = _number(daily.get("open")), _number(daily.get("close"))
-    if not daily_open or not daily_close or daily_open < 0 or daily_close < 0:
+    pair = daily_price_pair(daily)
+    if pair is None:
         return None
-    a, b = opening / daily_open, close / daily_close
+    a, b = opening / pair[0], close / pair[1]
     # Ignore normal venue/auction differences; require a common factor
     # more than 5% from parity with open and close agreeing within 1%.
-    return (a, b) if min(abs(a - 1), abs(b - 1)) > 0.05 and abs(a / b - 1) <= 0.01 else None
+    if math.isfinite(a) and math.isfinite(b) and min(abs(a - 1), abs(b - 1)) > 0.05 and abs(a - b) <= 0.01 * b:
+        return a, b
+    return None
+
+
+def _session_levels(session, daily, source_status):
+    if source_status != "available":
+        return None, None, f"snapshot_{source_status}"
+    row = daily.get(session["date"])
+    if row is None:
+        return None, None, "no_daily_row"
+    bars = session["bars"]
+    pair = daily_price_pair(row)
+    if (pair is None or not bars or bars[0]["time"] != session["open_utc"]
+            or bars[-1]["time"] + STEP != session["close_utc"]):
+        return None, None, "price_unverified"
+    opening, close = bars[0]["open"], bars[-1]["close"]
+    if price_basis_mismatch(opening, close, row):
+        return None, None, "price_mismatch"
+    if max(abs(opening / pair[0] - 1), abs(close / pair[1] - 1)) > 0.05:
+        return None, None, "price_unverified"
+
+    levels = []
+    invalid = False
+    for field, low, high in (("upper", 1, 2), ("lower", 0.5, 1)):
+        raw = row.get(field)
+        price = _positive_price(raw)
+        if raw is not None and (price is None or not low <= price / pair[0] <= high):
+            invalid, price = True, None
+        levels.append(price)
+    status = "invalid_levels" if invalid else "missing_levels" if None in levels else "available"
+    return *levels, status
 
 
 def _add_vwap(session):
@@ -71,23 +114,19 @@ def month_payload(store: FiveMinuteStore, daily_cache: Path, month: str) -> dict
         raise ValueError("Enter a SPY month from January 2000 onward.")
     data = store.read_month(month)
     rows = data["sessions"]
-    daily, status = _daily_levels(daily_cache)
+    daily, source = _daily_levels(daily_cache)
+    status = source
     for session in rows:
-        row = daily.get(session["date"], {})
-        bars = session["bars"]
-        mismatch = (bars and bars[0]["time"] == session["open_utc"]
-                    and bars[-1]["time"] + STEP == session["close_utc"]
-                    and price_basis_mismatch(bars[0]["open"], bars[-1]["close"], row))
-        if mismatch:
-            session["upper"] = session["lower"] = None
+        session["upper"], session["lower"], session["daily_level_status"] = _session_levels(session, daily, source)
+        if session["daily_level_status"] == "price_mismatch":
             status = "price_mismatch"
-        else:
-            session["upper"], session["lower"] = _number(row.get("upper")), _number(row.get("lower"))
         _add_vwap(session)
     expected = sum((row["close_utc"] - row["open_utc"]) // STEP for row in rows)
     received = sum(len(row["bars"]) for row in rows)
     return {
         "month": month, "sessions": rows, "daily_status": status, "through": data["target"],
+        "published_start": data["published_start"], "published_through": data["published_through"],
+        "requested_through": data["requested_through"],
         "coverage": {
             "expected": expected, "received": received, "missing": expected - received,
             "unverified_sessions": sum(not row["verified"] for row in rows),

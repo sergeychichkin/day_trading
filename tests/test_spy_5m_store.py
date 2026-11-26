@@ -99,3 +99,28 @@ def test_timeout_cannot_promote_a_session_to_verified(intraday, tmp_path):
     assert store.pending([session]) == [session]
     store.record(session, "complete", bars)
     assert store.pending([session]) == []
+
+
+def test_partial_success_cannot_certify_bars_from_a_timeout(intraday, tmp_path):
+    store = intraday.FiveMinuteStore(tmp_path / "spy.db")
+    session = regular(intraday)
+    store.configure(123, "shares")
+    bars = bars_for(intraday, session)
+    store.record(session, "timeout", bars[:-1])
+    store.record(session, "complete", bars[-1:])
+    assert store.coverage([session])["received"] == 78
+    assert store.pending([session]) == [session]
+    store.record(session, "complete", [*bars[:-1], bars[-2]])
+    assert store.pending([session]) == [session]
+    store.record(session, "complete", bars)
+    assert store.pending([session]) == []
+
+
+def test_all_zero_volume_cannot_be_verified(intraday, tmp_path):
+    store = intraday.FiveMinuteStore(tmp_path / "spy.db")
+    session = regular(intraday)
+    store.configure(123, "shares")
+    rows = [replace(bar, volume=0, wap=None) for bar in bars_for(intraday, session)]
+    store.record(session, "complete", rows)
+    assert store.coverage([session])["received"] == 78
+    assert store.pending([session]) == [session]

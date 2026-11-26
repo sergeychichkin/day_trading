@@ -13,6 +13,16 @@ const day = new Intl.DateTimeFormat("en-US", {...zone, month: "short", day: "num
 const price = new Intl.NumberFormat("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 4});
 const quantity = new Intl.NumberFormat("en-US", {maximumFractionDigits: 2});
 const fields = ["open", "high", "low", "close", "volume", "vwap", "upper", "lower"];
+const levelStatus = {
+    available: "Levels from SPY daily snapshot",
+    snapshot_missing: "SPY daily snapshot not found",
+    snapshot_unreadable: "SPY daily snapshot could not be read",
+    no_daily_row: "No SPY daily row for this session",
+    missing_levels: "Daily snapshot has no value for one or both levels",
+    invalid_levels: "One or both daily levels are invalid",
+    price_unverified: "Levels withheld: price scale could not be verified for this session",
+    price_mismatch: "Levels withheld: SPY daily and intraday price scales differ",
+};
 const chart = LightweightCharts.createChart(document.querySelector("#chart"), {
     autoSize: true,
     layout: {background: {color: "#101824"}, textColor: "#aebbd0", fontFamily: "Segoe UI, sans-serif"},
@@ -65,6 +75,9 @@ function updateLegend(time) {
     const values = {...bar, upper: session?.upper, lower: session?.lower};
     document.querySelector("#legend-time").textContent = time == null ? "—" : stamp.format(time * 1000);
     document.querySelector("#legend-conflict").hidden = !conflictTimes.has(time);
+    const levelNote = document.querySelector("#legend-level-status");
+    levelNote.textContent = levelStatus[session?.daily_level_status] ?? "";
+    levelNote.hidden = !levelNote.textContent;
     for (const field of fields) {
         const format = field === "volume" ? quantity : price;
         document.querySelector("#legend-" + field).textContent = values[field] == null ? "—" : format.format(values[field]);
@@ -131,15 +144,22 @@ function drawMonth(data) {
     if (counts.missing) parts.push(`${counts.missing} missing`);
     if (counts.unverified_sessions) parts.push(`${counts.unverified_sessions} unverified sessions`);
     if (counts.conflicting) parts.push(`${counts.conflicting} conflicting bars`);
-    if (data.through) parts.push(`Checked through ${data.through}`);
+    if (data.published_start && data.published_through) {
+        parts.push(`Published ${data.published_start} through ${data.published_through}`);
+    }
+    if (data.requested_through && data.requested_through !== data.published_through) {
+        parts.push(`Requested through ${data.requested_through}`);
+    }
     const mismatch = data.daily_status === "price_mismatch";
     parts.push(mismatch ? "Daily levels hidden on sessions with a different price scale"
         : data.daily_status === "available" ? "Levels: SPY daily snapshot" : "Daily levels unavailable");
-    status(parts.join(" · "), mismatch || counts.missing || counts.unverified_sessions || counts.conflicting
+    const behind = data.published_through && data.requested_through > data.published_through;
+    status(parts.join(" · "), behind || mismatch || counts.missing || counts.unverified_sessions || counts.conflicting
         ? "incomplete" : "");
 
     if (firstSession === null) {
-        setEmpty("No cached SPY five-minute bars for this month.");
+        setEmpty(data.published_start ? "No published SPY five-minute bars for this month."
+            : "No cached SPY five-minute bars for this month.");
         return;
     }
     candles.setData(prices);
@@ -151,7 +171,11 @@ function drawMonth(data) {
         addLine(session.bars.filter(bar => bar.vwap != null).map(bar => ({time: bar.time, value: bar.vwap})), vwap);
         for (const [field, color] of [["upper", upper], ["lower", lower]]) {
             const value = session[field];
-            if (value != null) addLine([{time: session.open_utc, value}, {time: session.close_utc, value}], color);
+            if (value == null) continue;
+            const points = [];
+            // Keep price-level data inside the viewport when zoomed between endpoints.
+            for (let time = session.open_utc; time <= session.close_utc; time += 300) points.push({time, value});
+            addLine(points, color);
         }
     }
     setEmpty("");
@@ -193,10 +217,12 @@ async function start() {
     try {
         const {months, default_month: latest} = await getJson("/api/spy/5m/months");
         if (!months.length) {
-            setEmpty("No SPY five-minute cache. Run python -m qqq_viewer.spy_5m_backfill --volume-unit shares --probe.");
+            setEmpty("No SPY five-minute cache. Run python -m qqq_viewer.spy_5m_contiguous --volume-unit shares. " +
+                "For a custom server --spy-5m-db, use the same path with the downloader's --db.");
             status("No cached months");
             return;
         }
+        picker.min = months[0];
         picker.max = months.at(-1);
         picker.value = latest || picker.max;
         picker.disabled = false;

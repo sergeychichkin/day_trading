@@ -9,9 +9,11 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import sleep
 
 import pandas as pd
 import pandas_market_calendars as markets
+from filelock import FileLock
 
 from .sessions import NEW_YORK
 
@@ -100,16 +102,42 @@ def _snapshot(dates: list[date], source: dict[date, tuple]) -> dict:
 
 
 def _write_snapshot(path: Path, snapshot: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False) as file:
         temporary = Path(file.name)
         try:
             json.dump(snapshot, file, separators=(",", ":"), allow_nan=False)
             file.close()
-            temporary.replace(path)
+            for delay in (0.025, 0.05, 0.1, 0.2, None):
+                try:
+                    temporary.replace(path)
+                    break
+                except PermissionError as exc:
+                    if delay is None or getattr(exc, "winerror", None) not in (5, 32, 33):
+                        raise
+                    sleep(delay)
         finally:
             file.close()
             temporary.unlink(missing_ok=True)
+
+
+def _publish(path: Path, candidate: dict) -> None:
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(path) + ".lock", timeout=5):
+        try:
+            previous = json.loads(path.read_bytes())
+            through = date.fromisoformat(previous["through"]).isoformat()
+            known_dates = {date.fromisoformat(bar["time"]).isoformat() for bar in previous["bars"]}
+        except (FileNotFoundError, ValueError, KeyError, TypeError):
+            # A missing or malformed file has no usable snapshot to preserve.
+            pass
+        else:
+            if candidate["through"] < through:
+                raise ValueError(f"Download is older than the installed snapshot through {through}; cache unchanged.")
+            dropped = sorted(known_dates - {bar["time"] for bar in candidate["bars"]})
+            if dropped:
+                raise ValueError(f"Download omits {len(dropped):,} cached sessions (first: {dropped[0]}); cache unchanged.")
+        _write_snapshot(path, candidate)
 
 
 def refresh(path: Path, now: datetime, *, download: Callable | None = None) -> dict:
@@ -125,7 +153,7 @@ def refresh(path: Path, now: datetime, *, download: Callable | None = None) -> d
         interval="1d", auto_adjust=False, actions=False, prepost=False, progress=False, threads=False,
     )
     snapshot = _snapshot(dates, _normalize(frame, set(dates)))
-    _write_snapshot(path, snapshot)
+    _publish(path, snapshot)
     return snapshot
 
 

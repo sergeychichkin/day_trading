@@ -27,9 +27,9 @@ def spy_files(tmp_path):
         store.record(session, "complete", rows)
     daily = tmp_path / "spy.json"
     daily.write_text(json.dumps({"bars": [
-        {"time": first.date.isoformat(), "upper": 110.123456, "lower": 93.25},
-        {"time": second.date.isoformat(), "upper": 113, "lower": 90},
-        {"time": december.date.isoformat(), "upper": 120, "lower": 90},
+        {"time": first.date.isoformat(), "open": 99.5, "close": 101, "upper": 110.123456, "lower": 93.25},
+        {"time": second.date.isoformat(), "open": 100, "close": 101, "upper": 113, "lower": 90},
+        {"time": december.date.isoformat(), "open": 100, "close": 101, "upper": 120, "lower": 90},
     ]}), encoding="utf-8")
     return store, daily, (first, second, december)
 
@@ -116,3 +116,76 @@ def test_price_scale_mismatch_in_replaced_daily_snapshot_hides_only_affected_lev
     affected = by_day[second.date.isoformat()]
     assert (affected["upper"], affected["lower"]) == (None, None)
     assert affected["bars"][0]["vwap"] == 100.5
+
+
+def test_published_bounds_exclude_out_of_scope_sessions_from_counts(spy_files):
+    from qqq_viewer.spy_5m_view import month_index, month_payload
+
+    store, daily, (_, early, december) = spy_files
+    with store._connection(write=True) as db:
+        db.execute("DELETE FROM bars WHERE date < ?", (early.date.isoformat(),))
+        db.executemany("INSERT INTO metadata VALUES (?,?)", [
+            ("verified_contiguous_start", early.date.isoformat()),
+            ("verified_contiguous_end", december.date.isoformat()),
+            ("requested_through", "2025-12-03"),
+        ])
+    index = month_index(store)
+    assert index["months"] == ["2025-11", "2025-12"]
+    november = month_payload(store, daily, "2025-11")
+    assert november["coverage"]["expected"] == 42
+    assert november["coverage"]["missing"] == 0
+    assert november["published_start"] == "2025-11-28"
+    assert november["published_through"] == "2025-12-01"
+    assert november["requested_through"] == "2025-12-03"
+    assert month_payload(store, daily, "2025-10")["sessions"] == []
+
+
+@pytest.mark.parametrize("endpoint", ["open", "close"])
+def test_missing_price_endpoint_withholds_unvalidated_daily_levels(tmp_path, endpoint):
+    from qqq_viewer.spy_5m_view import month_payload
+
+    store = FiveMinuteStore(tmp_path / "cache.db")
+    session = sessions(date(2025, 11, 28), date(2025, 11, 28))[0]
+    rows = bars_for(spy_5m_store, session)
+    store.record(session, "complete", rows[1:] if endpoint == "open" else rows[:-1])
+    daily = tmp_path / "spy.json"
+    daily.write_text(json.dumps({"bars": [{
+        "time": session.date.isoformat(), "open": 50, "close": 50.5, "upper": 55, "lower": 45,
+    }]}), encoding="utf-8")
+    record = month_payload(store, daily, "2025-11")["sessions"][-1]
+    assert record["daily_level_status"] == "price_unverified"
+    assert (record["upper"], record["lower"]) == (None, None)
+    assert len(record["bars"]) == 41
+
+
+def test_missing_and_malformed_daily_levels_keep_candles_and_valid_values(spy_files):
+    from qqq_viewer.spy_5m_view import month_payload
+
+    store, daily, (first, early, december) = spy_files
+    document = json.loads(daily.read_bytes())
+    document["bars"].pop(0)
+    document["bars"][0]["upper"] = 10**400
+    document["bars"][1]["lower"] = None
+    daily.write_text(json.dumps(document), encoding="utf-8")
+    nobody, invalid = month_payload(store, daily, "2025-11")["sessions"][-2:]
+    assert nobody["date"] == first.date.isoformat() and nobody["daily_level_status"] == "no_daily_row"
+    assert invalid["date"] == early.date.isoformat() and invalid["daily_level_status"] == "invalid_levels"
+    assert (invalid["upper"], invalid["lower"], invalid["bars"][0]["vwap"]) == (None, 90, 100.5)
+    valid = month_payload(store, daily, "2025-12")["sessions"][-1]
+    assert valid["date"] == december.date.isoformat() and valid["daily_level_status"] == "missing_levels"
+    assert (valid["upper"], valid["lower"]) == (120, None)
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("upper", 10**100), ("upper", 99), ("lower", 110), ("lower", -1), ("lower", False),
+])
+def test_implausible_levels_are_rejected_individually(spy_files, field, value):
+    from qqq_viewer.spy_5m_view import month_payload
+
+    store, daily, _ = spy_files
+    document = json.loads(daily.read_bytes())
+    document["bars"][1][field] = value
+    daily.write_text(json.dumps(document), encoding="utf-8")
+    row = month_payload(store, daily, "2025-11")["sessions"][-1]
+    assert row["daily_level_status"] == "invalid_levels" and row[field] is None
+    assert row["lower" if field == "upper" else "upper"] is not None

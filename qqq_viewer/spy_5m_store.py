@@ -250,12 +250,14 @@ class FiveMinuteStore:
         first = date.fromisoformat(month + "-01")
         last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
         if not self.path.is_file():
-            return {"target": None, "sessions": []}
+            return {**self.bounds(), "sessions": []}
         result = []
         with self._connection() as db:
-            through = _metadata(db, "target") or self._latest(db)
+            bounds = self._bounds(db)
+            through = bounds["published_through"] or bounds["target"]
+            start = date.fromisoformat(bounds["published_start"]) if bounds["published_start"] else START
             if through:
-                for session in sessions(max(first, START), min(last, date.fromisoformat(through))):
+                for session in sessions(max(first, start), min(last, date.fromisoformat(through))):
                     key = session.date.isoformat()
                     verified = db.execute("SELECT verified FROM sessions WHERE date=?", (key,)).fetchone()
                     result.append({
@@ -266,4 +268,4 @@ class FiveMinuteStore:
                         "bars": [asdict(FiveMinuteBar(*row)) for row in db.execute(
                             f"SELECT {BAR_FIELDS} FROM bars WHERE date=? ORDER BY time", (key,))],
                     })
-        return {"target": through, "sessions": result}
+        return {**bounds, "sessions": result}

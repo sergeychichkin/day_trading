@@ -1,10 +1,11 @@
-# QQQ viewer and opening-range backtest
+# Local chart viewers and QQQ opening-range backtest
 
 ## Overview
 
 This Python package acquires Interactive Brokers historical bars into an
 auditable SQLite cache, serves a local viewer, and generates opening-range
-backtest reports.
+backtest reports. It separately acquires Yahoo Finance SPY daily bars and
+publishes a JSON snapshot for the SPY chart.
 
 ## Interface
 
@@ -15,7 +16,11 @@ backtest reports.
 - `tws.py`: `TwsHistory` qualifies the QQQ contract and requests historical
   data; `backfill.py` provides `run_backfill` and its CLI.
 - `server.py`: `make_server` serves the viewer and the `/api/months` and
-  `/api/month/<YYYY-MM>` endpoints on localhost.
+  `/api/month/<YYYY-MM>` endpoints on localhost. `/spy` is the SPY page;
+  `/api/spy/daily` serves the configured SPY snapshot or an empty payload if
+  its file is absent.
+- `spy_daily.py`: `refresh` downloads SPY OHLCV and calculates both 10-session
+  levels, the close EMA(20), and the volume SMA(20) before publishing.
 - `opening_range.py`: `replay_session` models a session and returns a
   `SessionReplay`. `backtest_opening_range.py` loads settings, validates input,
   runs scenarios and provides the backtest CLI.
@@ -36,6 +41,9 @@ backtest reports.
   complete, conflict-free input with matching source and symbol metadata.
 - `backtest_opening_range.output_path` protects the cache, SQLite sidecars and
   designated prior reports from being selected as the output.
+- In SPY JSON, `through` is the last completed NYSE session checked, not
+  necessarily the last cached bar. Missing scheduled sessions reset indicator
+  windows. The server does not recalculate indicators or call Yahoo.
 
 ## Side Effects
 
@@ -45,6 +53,9 @@ backtest reports.
   writes attempts and progress to the cache and terminal.
 - `make_server` binds a threaded local HTTP server and reads assets and cache.
   `write_report` reads assets and writes generated HTML.
+- `spy_daily.refresh` calls Yahoo and atomically replaces its JSON snapshot.
+  A sibling lock serializes publication; an older cutoff or loss of existing
+  dates rejects the replacement.
 
 ## Verification
 
@@ -52,16 +63,22 @@ backtest reports.
 
 ## SPY five-minute interfaces
 
-- `spy_5m_backfill.py` qualifies SPY, probes old and recent data, requests
-  bounded TWS history.
-- `spy_5m_contiguous.py` builds, refreshes and verifies the published range.
+- `spy_5m_backfill.py` owns SPY contract qualification and bounded TWS
+  history requests. Its original January 2000 probe is a separate diagnostic.
+- `spy_5m_contiguous.py` is the supported build, refresh, and read-only
+  verification command. It revalidates the attached staging snapshot within
+  the publication transaction and never advances the published endpoint
+  across incomplete sessions.
 - `spy_5m_store.py` owns the independent SQLite schema and NYSE 300-second
-  grid. UTC bars retain broker WAP. A duplicate may fill missing WAP but
-  cannot replace accepted values; conflicting revised bars are flagged.
+  grid. Verification requires a full successful response and positive total
+  volume. UTC bars retain broker WAP; a duplicate may fill missing WAP but
+  cannot replace accepted values. Conflicting revisions are flagged.
 - `spy_5m_view.py` builds month payloads for `/api/spy/5m/months` and
   `/api/spy/5m/month/<YYYY-MM>`. VWAP resets at the open and is unavailable
   after a gap or unusable positive-volume WAP. `upper` and `lower` come from
-  the SPY daily JSON, joined on exchange-local date without rescaling.
+  the SPY daily JSON, joined on exchange-local date without rescaling. The
+  API reports published bounds and requested cutoff separately, and a level
+  status per session.
 - `backtest_spy_5m.py` runs Entry 1 offline against the publisher's verified
   SQLite range and the Yahoo/SPY daily snapshot. It checks cache identity and
   published NYSE endpoints, copies SQLite inputs to a private snapshot, and

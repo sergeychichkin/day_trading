@@ -1,10 +1,12 @@
-# QQQ opening-session viewer blueprint
+# Local QQQ and SPY viewer blueprint
 
 ## System Overview
 
 The project stores Interactive Brokers QQQ one-minute historical data in a
 SQLite cache, provides a local chart viewer, and runs opening-range backtests
-that produce standalone HTML reports. See `README.md` for setup and CLI usage.
+that produce standalone HTML reports. The same server serves a SPY daily chart
+from a separate Yahoo Finance JSON snapshot. See `README.md` for setup and CLI
+usage.
 
 ## Subdirectories & System Boundaries
 
@@ -21,10 +23,14 @@ that produce standalone HTML reports. See `README.md` for setup and CLI usage.
   incomplete, conflicting or mismatched backtest input.
 - `qqq_viewer.sessions.Session.minutes` defines regular-session minutes with
   an inclusive open and exclusive close.
+- The SPY snapshot contains completed NYSE sessions and precomputed indicators.
+  It does not share input or storage with QQQ.
 
 ## Global Side Effects
 
 - Backfill communicates with local TWS and writes the configured SQLite cache.
+- SPY refresh calls Yahoo Finance and publishes the JSON snapshot under a file
+  lock; an older or less complete refresh cannot replace it.
 - The viewer listens on localhost and reads the cache and static assets.
 - The backtest reads configuration and cache data and writes an HTML report.
 

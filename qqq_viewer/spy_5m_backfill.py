@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import math
 import sys
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -14,8 +13,10 @@ from ib_async import Stock, util
 from ib_async.wrapper import RequestError
 
 from .sessions import NEW_YORK, Session
-from .spy_5m_store import DEFAULT_DB, FiveMinuteBar, FiveMinuteStore, completed, expected_times, normalize_bar
-from .spy_5m_view import price_basis_mismatch
+from .spy_5m_store import (
+    DEFAULT_DB, FiveMinuteBar, FiveMinuteStore, completed, expected_times, normalize_bar, usable_session,
+)
+from .spy_5m_view import daily_price_pair, price_basis_mismatch
 from .spy_daily import DEFAULT_CACHE
 from .tws import ContractIdentity, TwsHistory, classify_error
 
@@ -75,6 +76,8 @@ class SpyHistory(TwsHistory):
             status, diagnostic = "disconnected", str(exc)
         finally:
             wrapper._endReq(request_id)
+            # ib_async leaves the result container behind on RequestError.
+            wrapper._results.pop(request_id, None)
         result = [FiveMinuteBar(int(bar.date.timestamp()), bar.open, bar.high, bar.low, bar.close,
                                 bar.volume, bar.average) for bar in bars
                   if isinstance(bar.date, datetime) and bar.date.utcoffset() is not None]
@@ -116,9 +119,8 @@ def _probe_window(store, client, window, duration, label):
             continue
         grid = expected_times(session)
         by_time = {bar.time: bar for bar in rows if bar.time in grid}
-        if len(by_time) == len(grid) and all(bar.volume == 0 or bar.wap is not None for bar in by_time.values()):
-            if any(bar.volume > 0 for bar in by_time.values()):
-                usable[session] = [by_time[time] for time in grid]
+        if usable_session(session, list(by_time.values())):
+            usable[session] = [by_time[time] for time in grid]
     print(f"{label} probe: {len(usable)}/{len(window)} usable sessions; "
           f"{sum(len(rows) for rows in sample.values()):,} accepted bars ({status})"
           f"{': ' + diagnostic if diagnostic else ''}.", flush=True)
@@ -136,9 +138,7 @@ def _price_check(daily_cache, samples):
         row = daily.get(session.date.isoformat())
         if row is None:
             continue
-        opening, close = row.get("open"), row.get("close")
-        if not all(isinstance(value, (int, float)) and math.isfinite(value) and value > 0
-                   for value in (opening, close)):
+        if daily_price_pair(row) is None:
             continue
         overlaps += 1
         if ratios := price_basis_mismatch(rows[0].open, rows[-1].close, row):
@@ -151,6 +151,8 @@ def _price_check(daily_cache, samples):
 
 def run_backfill(store: FiveMinuteStore, client, now: datetime, *, volume_unit: str, daily_cache: Path,
                  probe_only: bool = False) -> dict:
+    if store.bounds()["published_start"]:
+        raise ValueError("Use qqq_viewer.spy_5m_contiguous for the published cache; select a separate --db for this probe.")
     target = completed(now)
     if not target:
         raise ValueError("No completed SPY sessions in the requested range.")

@@ -10,6 +10,11 @@
 
 **Spec:** [SPY five-minute viewer design](../specs/2026-11-25-spy-five-minute-viewer-design.md)
 
+**Operational follow-up:** This plan records the original January 2000
+probe-gated implementation. The supported uninterrupted build and refresh
+workflow and its observed cutoff are described in the
+[coverage record](../../spy-5m-coverage.md).
+
 ## Global Constraints
 
 - Start January 1, 2000. Target the latest NYSE regular session that has closed when the run starts. Never shift the start date to hide an outage.
