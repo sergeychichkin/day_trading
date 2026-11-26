@@ -20,7 +20,7 @@ from .sessions import NEW_YORK
 from .spy_5m_replay import AccountSettings, EntrySettings, replay_day
 from .spy_5m_report import _validate_windows_output_name
 from .spy_5m_snapshot import SQLITE_SIDECARS, read_snapshot
-from .spy_5m_store import BAR_FIELDS, FiveMinuteBar, expected_times, normalize_bar, sessions
+from .spy_5m_store import BAR_FIELDS, FiveMinuteBar, expected_times, normalize_bar, publication, sessions
 from .spy_daily import DAILY_IDENTITY
 
 SPY_CONTRACT = "756733"
@@ -61,7 +61,7 @@ def _numeric(value, key):
 
 def _settings_entry(values):
     for key in ("entry1_start_time", "entry1_end_time"):
-        if key in values:
+        if key in values and not isinstance(values[key], time):
             try:
                 values[key] = time.fromisoformat(values[key])
             except (ValueError, TypeError) as exc:
@@ -196,6 +196,9 @@ def _point(points, timestamp, balance):
 
 def _stats(case, starting):
     trades = case["trades"]
+    gains = math.fsum(trade["pnl"] for trade in trades if trade["pnl"] > 0)
+    losses = math.fsum(-trade["pnl"] for trade in trades if trade["pnl"] < 0)
+    profit_factor = gains / losses if losses else ("infinite" if gains else None)
     values = [point["value"] for point in case["equity"]]
     ending = values[-1] if values else starting
     peak, drawdown = starting, 0.0
@@ -206,6 +209,7 @@ def _stats(case, starting):
         "trades": len(trades), "ending_equity": ending, "net_pnl": ending - starting,
         "return_pct": 100 * (ending / starting - 1), "max_drawdown_pct": drawdown,
         "win_rate": 100 * sum(trade["pnl"] > 0 for trade in trades) / len(trades) if trades else None,
+        "profit_factor": profit_factor,
         "ambiguous": sum(trade["ambiguous"] for trade in trades),
         **{key: sum(trade[key] for trade in trades) for key in ("commission", "slippage", "gap_slippage")},
     }
@@ -263,10 +267,10 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
         metadata = dict(db.execute("SELECT key,value FROM metadata"))
         if metadata.get("contract") != SPY_CONTRACT or metadata.get("volume_unit") not in {"shares", "lots"}:
             raise ValueError("The intraday cache does not identify the expected SPY contract and volume unit.")
-        published_start = metadata.get("verified_contiguous_start")
-        published_end = metadata.get("verified_contiguous_end") or metadata.get("target")
-        if not published_start or not published_end:
+        bounds = publication(db)
+        if bounds is None:
             raise ValueError("No published uninterrupted SPY range to backtest.")
+        published_start, published_end = bounds
         first, last = map(date.fromisoformat, (published_start, published_end))
         start, end = start or first, end or last
         if not first <= start <= end <= last:
@@ -280,14 +284,24 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
         days = [session for session in calendar if session.date <= signal_days[-1].date]
         if "next_session_open" in modes:
             signal_end = signal_days[-1].date
-            candidate = sessions(signal_end + timedelta(days=1), signal_end + timedelta(days=14))[0]
-            try:
-                tail_bars = _verified_bars(db, candidate)
-            except ValueError as exc:
-                tail_error = str(exc)
+            candidate = next(iter(sessions(signal_end + timedelta(days=1), signal_end + timedelta(days=14))), None)
+            if candidate is None:
+                tail_error = "No next NYSE session found in the exchange calendar lookup."
             else:
-                tail = candidate
-                days.append(tail)
+                try:
+                    tail_bars = _verified_bars(db, candidate)
+                except ValueError as exc:
+                    day = candidate.date.isoformat()
+                    if candidate.date > last and not any(
+                        db.execute(f"SELECT 1 FROM {table} WHERE date=? LIMIT 1", (day,)).fetchone()
+                        for table in ("bars", "sessions", "attempts", "conflicts")
+                    ):
+                        tail_error = f"No verified session in cache after {signal_end}."
+                    else:
+                        tail_error = str(exc)
+                else:
+                    tail = candidate
+                    days.append(tail)
         bars = _verified_bars(db, days[0])
         for i, session in enumerate(days):
             following = days[i + 1] if i + 1 < len(days) else None
@@ -352,11 +366,15 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     }
 
 
-def output_path(path: Path | None, settings: BacktestSettings, coverage: dict) -> Path:
-    requested = path or Path("output") / f"SPY_5m_entry1_{coverage['start']}_{coverage['end']}.html"
+def output_path(path: Path | None, settings: BacktestSettings, coverage: dict | None = None, *,
+                config_path: Path | None = None) -> Path:
+    if path is None:
+        if coverage is None:
+            raise ValueError("Coverage is needed to name the default report.")
+        path = Path("output") / f"SPY_5m_entry1_{coverage['start']}_{coverage['end']}.html"
     if os.name == "nt":
-        _validate_windows_output_name(requested)
-    candidate = requested.resolve()
+        _validate_windows_output_name(path)
+    candidate = path.resolve()
     if os.name == "nt":
         _validate_windows_output_name(candidate)
     protected = [settings.intraday_cache, settings.daily_cache]
@@ -364,10 +382,20 @@ def output_path(path: Path | None, settings: BacktestSettings, coverage: dict) -
     for source in protected:
         if candidate == source.resolve() or (candidate.exists() and source.exists() and candidate.samefile(source)):
             raise ValueError("Report output cannot overwrite an input cache or its sidecars.")
+    if config_path is not None and (
+        candidate == config_path.resolve()
+        or (candidate.exists() and config_path.exists() and candidate.samefile(config_path))
+    ):
+        raise ValueError("Report output cannot overwrite the settings file.")
     if candidate.suffix.lower() != ".html":
         raise ValueError("Report output must be an .html file.")
     if candidate.exists():
         raise ValueError("Report already exists; use a different --output to keep the previous run.")
+    for parent in candidate.parents:
+        if parent.exists():
+            if not parent.is_dir():
+                raise ValueError(f"Report output parent is not a directory: {parent}")
+            break
     return candidate
 
 
@@ -384,10 +412,10 @@ def main(argv=None) -> int:
         from .spy_5m_report import write_report
 
         settings = load_settings(args.config, entry1_start_time=args.entry1_start_time, entry1_end_time=args.entry1_end_time)
+        path = output_path(args.output, settings, config_path=args.config) if args.output is not None else None
         data = run(settings, args.start, args.end)
-        path = output_path(args.output, settings, data["coverage"])
-        if path == args.config.resolve() or (args.config.exists() and path.exists() and path.samefile(args.config)):
-            raise ValueError("Report output cannot overwrite the settings file.")
+        if path is None:
+            path = output_path(None, settings, data["coverage"], config_path=args.config)
         write_report(path, data)
     except (ValueError, OSError, sqlite3.Error) as exc:
         print(f"SPY backtest: {exc}", file=sys.stderr)

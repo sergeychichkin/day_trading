@@ -14,6 +14,10 @@ Compare SPY entry time windows and the effect of exiting at the entry day's clos
 - Add `config/SPY.toml` for the ticker, intraday and daily cache paths, entry window, ATR buffers, order lifetime, equity/risk, tick size, buying-power cap, simulated execution costs, and exit switches. Use the per-ticker layout for future instruments, but reject any ticker that does not match a supported cache identity. The first adapter is SPY.
 - Use the verified, conflict-free five-minute SPY cache and the existing Yahoo daily snapshot, joined on New York regular-session date. Use the daily chart's exact `upper` value (`avg_max` applied to the daily open), not a percentage reapplied to the intraday open. Treat a missing or malformed level or inconsistent opening price basis as an unavailable setup. For a trading decision compare only the two sources' opening prices, not the current day's close or range. Reject a relative difference greater than 5% (`abs(intraday_open / daily_open - 1)`); a read-only check of all 3,249 currently overlapping sessions found a maximum difference of 1.3906%. Report excluded days and reasons.
 - Default to the published intraday date range; expose inclusive `--start` and `--end` for signal sessions. Use earlier verified bars only for warmup. Reject gaps or conflicts inside the requested replay input; do not invent candles. Record settings, effective range, any skipped next-open boundary, and fingerprints of both inputs so runs can be compared.
+- Entry window settings accept quoted times or native TOML local time literals
+  on the five-minute grid. The corresponding `--entry1-start-time` and
+  `--entry1-end-time` flags override those settings. The intraday fingerprint
+  includes warmup, signal, and any verified exit-only bars.
 
 ## Entry 1 state machine
 
@@ -30,10 +34,16 @@ Compare SPY entry time windows and the effect of exiting at the entry day's clos
 - **Exit 1 (default enabled):** If not stopped, exit at the entry session's final close, including scheduled early closes. Process protective stops before the same-day time exit.
 - **Exit 2 (default disabled):** If not stopped during the entry session, hold across the closed period and exit at the next NYSE regular-session open. Model no extended-hours executions; overnight movement is reflected in the opening fill. Close the old position before evaluating new signals for that session. If the next verified open is just outside the signal range, use it only to close the open trade and disclose the exit date. If no verified next open exists in the cache, exclude that final session from next-open entries and disclose why.
 - If both exits are enabled, run both independently into one report; if neither is enabled, reject the settings. Exposure beyond plan risk can occur with gaps, slippage and fees.
+- A candle that closes at or below the stop after an intrabar entry guarantees
+  a stop-out and is not flagged as ambiguous. The next-open scenario may use a
+  separately verified following session beyond the published signal range
+  solely to exit.
 
 ## QQQ-style standalone report
 
 Write a separate self-contained HTML report with an executive scenario summary, closed-balance equity and drawdown, a buy-and-hold price benchmark over the selected signal range, an order/event log, and an executed-trades log. Include a month-selectable five-minute price chart with daily levels and entry, stop, and exit markers. Selecting a log row should jump to the applicable session; label next-open exits and ambiguous bars. Show trade counts, dates, net P&L, costs, and rules so results can be checked. Keep new report assets separate where QQQ-specific controls do not apply.
+
+The report shows each scenario's profit factor using realized trade P&L after costs.
 
 ## Verification
 

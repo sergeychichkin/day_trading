@@ -15,6 +15,8 @@ def _validate_windows_output_name(path) -> None:
     remainder = name[2:] if re.match(r"^[A-Za-z]:", name) else name
     if ":" in remainder:
         raise ValueError("The report path cannot use Windows alternate data streams.")
+    if os.path.isreserved(name):
+        raise ValueError("The report path contains a reserved or invalid Windows name.")
 
 
 def write_report(path: Path, data: dict) -> None:

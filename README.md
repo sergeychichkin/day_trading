@@ -140,7 +140,15 @@ Run the replay from the repository root with the verified intraday cache and SPY
 
 [`config/SPY.toml`](config/SPY.toml) controls the entry window, the two ATR buffers, the order lifetime, equity and risk, and execution costs. Signal times label five-minute candle **starts**, in New York time. Only the first qualifying bull close can arm a setup; the first later bear can occur after the signal window. At the bear close the runner fixes the buy trigger and protective stop from the information available then, including the low so far, before allowing a fill on the next bar. The order cannot survive its expiry or the regular-session close.
 
+TOML accepts quoted times such as `"09:30"` or local time literals such as
+`09:30:00` on the same five-minute grid. `--entry1-start-time` and
+`--entry1-end-time` override their corresponding TOML values.
+
 To compare same-day close and next-session open, copy the TOML alongside the original, enable `next_session_open` in `[exits]`, and give the run a distinct `--output`. Each enabled exit compounds independently. A next-open exit can use the verified opening just beyond `--end`; if there is no next verified session, that final day is excluded from next-open entries. The report states the actual signal range and any exit-only date. Existing reports are not overwritten.
+
+The immediate next NYSE session may be used for an exit even beyond the
+published signal range, but only if its cached bars independently pass
+verification. It cannot generate entries and is hidden in the same-day view.
 
 The backtest uses whole shares, 1% planned risk and a cash cap by default. It charges modeled IBKR Pro Fixed commissions and configurable adverse slippage. Gap moves and five-minute path ambiguity are modeled separately; planned risk is not a guaranteed maximum loss. The report includes scenario results, equity and drawdown, a price-only buy-and-hold benchmark, session charts, and order and trade logs.
 
@@ -149,6 +157,10 @@ labels protective stops, same-day closes, next opens, and ambiguous stop bars.
 “Adverse gap vs. trigger/stop” is not total overnight movement: it measures
 adverse overshoot at the trigger or stop. All overnight movement is already
 reflected in net P&L.
+
+**Profit factor** is total net P&L from winning trades divided by the absolute
+net P&L from losing trades, after modeled costs. It is calculated separately
+for each exit scenario; `∞` means wins without losses and `—` means no nonzero trades.
 
 ### Reproduce the November 24, 2026 run
 
@@ -174,8 +186,9 @@ if (Test-Path $comparison) { throw "Choose an unused comparison config path." }
 
 Expected archived-input coverage: **3,249 signal sessions and 252,450 bars**;
 **71 trades** in each exit scenario. Under **Settings and input fingerprints**,
-compare these SHA-256 values (the intraday hash covers the replay bars, not
-the SQLite file bytes):
+compare these SHA-256 values. The intraday hash covers all consumed bars:
+ATR warmup, signal sessions, and any verified exit-only session. It does not
+hash the SQLite file bytes:
 
 - Intraday: `37d8a0626c5d9d1ea470bb358dde7713dad60f6828c0dcfa9c864682cc18cc29`
 - Daily: `b955d740c3111250be921f84ecbffd72c37fe2fda8c8c255496a9a27918e9577`

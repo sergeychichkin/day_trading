@@ -95,6 +95,110 @@ def test_overlap_keeps_atr_and_ignores_current_daily_high_low_close(runner, repl
         runner.run(cfg, date(2025, 11, 24), november28)
 
 
+@pytest.mark.parametrize("kind", [
+    "existing", "config alias", "input", "extension", "file ancestor",
+    pytest.param("reserved", marks=pytest.mark.skipif(os.name != "nt", reason="Windows path rules")),
+    pytest.param("wildcard", marks=pytest.mark.skipif(os.name != "nt", reason="Windows path rules")),
+])
+def test_cli_rejects_invalid_output_before_running(runner, replay_files, monkeypatch, capsys, kind):
+    store, _, config = replay_files
+    output = config.with_name("report.html")
+    if kind == "existing":
+        output.write_text("keep me", encoding="utf-8")
+    elif kind == "config alias":
+        os.link(config, output)
+    elif kind == "input":
+        output = store.path
+    elif kind == "extension":
+        output = output.with_suffix(".txt")
+    elif kind == "file ancestor":
+        output = config / "report.html"
+    else:
+        output = output.with_name("NUL.html" if kind == "reserved" else "bad*.html")
+    protected = config if kind == "file ancestor" else output if kind in {"existing", "config alias", "input"} else None
+    original = protected.read_bytes() if protected is not None else None
+    monkeypatch.setattr(runner, "run", lambda *args: pytest.fail("invalid path reached replay"))
+    assert runner.main(["--config", str(config), "--output", str(output)]) == 1
+    assert {"existing": "already exists", "config alias": "settings file",
+            "input": "input cache", "extension": ".html file", "file ancestor": "not a directory",
+            "reserved": "reserved or invalid Windows name", "wildcard": "reserved or invalid Windows name",
+            }[kind] in capsys.readouterr().err
+    if protected is not None:
+        assert protected.read_bytes() == original
+
+
+def test_cli_default_output_and_time_overrides(runner, replay_files, monkeypatch, capsys):
+    _, _, config = replay_files
+    monkeypatch.chdir(config.parent)
+    with config.open("a", encoding="utf-8") as stream:
+        stream.write('[entry1]\nentry1_start_time="09:30"\nentry1_end_time="09:35"\n')
+    assert runner.main(["--config", str(config), "--start", "2025-11-28", "--end", "2025-11-28",
+                        "--entry1-start-time", "09:40", "--entry1-end-time", "09:45"]) == 0
+    output = Path("output/SPY_5m_entry1_2025-11-28_2025-11-28.html")
+    payload = json.loads(output.read_text(encoding="utf-8")
+                         .split('id="report-data" type="application/json">', 1)[1].split("</script>", 1)[0])
+    entry = payload["settings"]["entry"]
+    assert (entry["entry1_start_time"], entry["entry1_end_time"]) == ("09:40", "09:45")
+    assert "1 trades" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", ["09:30:00", "09:32:00", "09:30:01"])
+def test_native_toml_time_uses_same_grid_validation(runner, replay_files, value):
+    _, _, config = replay_files
+    with config.open("a", encoding="utf-8") as stream:
+        stream.write(f"[entry1]\nentry1_start_time={value}\n")
+    if value == "09:30:00":
+        assert runner.load_settings(config).entry.entry1_start_time == time(9, 30)
+    else:
+        with pytest.raises(ValueError, match="without seconds or a time-zone offset"):
+            runner.load_settings(config)
+
+
+def test_reversed_publication_is_reported_as_invalid(runner, replay_files):
+    store, _, config = replay_files
+    with store._connection(write=True) as db:
+        db.execute("UPDATE metadata SET value='2025-12-02' WHERE key='verified_contiguous_start'")
+    with pytest.raises(ValueError, match="Invalid published SPY coverage bounds"):
+        runner.run(runner.load_settings(config))
+
+
+def test_missing_unpublished_tail_is_not_reported_as_damage(runner, replay_files):
+    _, _, config = replay_files
+    end = date(2025, 12, 1)
+    data = runner.run(runner.load_settings(config), end, end)
+    assert data["coverage"]["next_open_tail_unavailable"] == "No verified session in cache after 2025-12-01."
+
+
+def test_partial_unpublished_tail_is_reported_as_damage(runner, replay_files):
+    store, _, config = replay_files
+    with store._connection(write=True) as db:
+        db.execute("UPDATE metadata SET value='2025-11-28' WHERE key='target'")
+        db.execute("DELETE FROM bars WHERE date='2025-12-01'")
+    friday = date(2025, 11, 28)
+    data = runner.run(runner.load_settings(config), friday, friday)
+    assert "Incomplete" in data["coverage"]["next_open_tail_unavailable"]
+
+
+def test_empty_next_session_lookup_preserves_same_day_run(runner, replay_files, monkeypatch):
+    _, _, config = replay_files
+    real_sessions = runner.sessions
+    end = date(2025, 12, 1)
+    monkeypatch.setattr(runner, "sessions", lambda first, last: [] if first > end else real_sessions(first, last))
+    data = runner.run(runner.load_settings(config), end, end)
+    assert data["scenarios"][0]["stats"]["trades"] == 1
+    assert data["coverage"]["next_open_tail_unavailable"] == "No next NYSE session found in the exchange calendar lookup."
+
+
+@pytest.mark.parametrize(("pnls", "expected"), [
+    ([30, -10, 0, -5], 2.0), ([30, 0], "infinite"), ([-10, 0], 0.0), ([0], None), ([], None),
+])
+def test_profit_factor_uses_realized_net_trade_pnl(runner, pnls, expected):
+    case = {"equity": [], "trades": [
+        dict(pnl=pnl, ambiguous=False, commission=1, slippage=0.5, gap_slippage=0) for pnl in pnls
+    ]}
+    assert runner._stats(case, 100)["profit_factor"] == expected
+
+
 def test_exit_modes_compound_independently_and_use_only_verified_next_open(runner, replay_files):
     store, daily, config = replay_files
     settings = runner.load_settings(config)

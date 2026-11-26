@@ -20,6 +20,7 @@ const count = new Intl.NumberFormat("en-US", {maximumFractionDigits: 2});
 const price = n => n == null ? "—" : px.format(n);
 const money = n => usd.format(n);
 const pct = n => n == null ? "—" : `${n.toFixed(2)}%`;
+const profitFactor = n => n === "infinite" ? "∞" : n == null ? "—" : n.toFixed(2);
 const colors = {up: "#10b981", down: "#ef4444", upper: "#f1c375", lower: "#7eb8f1", vwap: "#c6a1fa"};
 const exitNames = {protective_stop: "Protective stop", same_day_close: "Same-day close", next_session_open: "Next-session open"};
 const exitMarkers = {protective_stop: "Stop", same_day_close: "Day close", next_session_open: "Next open"};
@@ -59,19 +60,20 @@ const scopedBars = new Map();
 const starts = new Map();
 let active = data.scenarios[0];
 
-function line(points, color, style = LightweightCharts.LineStyle.Solid) {
+function line(points, color, style = LightweightCharts.LineStyle.Solid, showSinglePoint = false) {
     if (points.length) {
-        const series = intraday.addLineSeries({...quiet, color, lineStyle: style, lineWidth: 1});
+        const series = intraday.addLineSeries({...quiet, color, lineStyle: style, lineWidth: 1,
+            pointMarkersVisible: showSinglePoint && points.length === 1, pointMarkersRadius: 3});
         series.setData(points);
         overlays.push(series);
     }
 }
 
-function horizontal(start, end, value, color, style) {
+function horizontal(start, end, value, color, style, showSinglePoint = false) {
     if (value == null) return;
     const points = [];
     for (let time = start; time <= end; time += STEP) points.push({time, value});
-    line(points, color, style);
+    line(points, color, style, showSinglePoint);
 }
 
 function legend(time) {
@@ -79,7 +81,7 @@ function legend(time) {
     if (!item) return;
     const {bar, session} = item;
     const text = [timestamp(time), `O ${price(bar.open)}`, `H ${price(bar.high)}`, `L ${price(bar.low)}`,
-        `C ${price(bar.close)}`, `Vol ${count.format(bar.volume)}`, `VWAP ${price(bar.vwap)}`,
+        `C ${price(bar.close)}`, `Vol ${count.format(bar.volume)} ${data.coverage.volume_unit}`, `VWAP ${price(bar.vwap)}`,
         `Upper ${price(session.upper)}`, `Lower ${price(session.lower)}`];
     if (session.levels_status !== "available") text.push(session.levels_status.replaceAll("_", " "));
     if (session.exit_only) text.push("Exit-only session");
@@ -123,8 +125,12 @@ function showSession(day, time) {
     legend(anchor);
 }
 
+function scenarioSessions(month) {
+    return (data.months[month] ?? []).filter(session => !session.exit_only || active.id === "next_session_open");
+}
+
 function drawMonth(month, focusDay, focusTime) {
-    const sessions = data.months[month] ?? [];
+    const sessions = scenarioSessions(month);
     get("month").value = month;
     get("selected-trade").textContent = "";
     scopedBars.clear();
@@ -154,7 +160,7 @@ function drawMonth(month, focusDay, focusTime) {
             markers.push({time: trade.signal_time, position: "aboveBar", shape: "circle", color: colors.upper, text: "Signal"});
             markers.push({time: trade.entry_time, position: "belowBar", shape: "arrowUp", color: colors.up, text: "Buy"});
             horizontal(trade.entry_time, Math.min(trade.exit_time, session.close_utc - STEP),
-                trade.initial_stop, colors.down, LightweightCharts.LineStyle.Dashed);
+                trade.initial_stop, colors.down, LightweightCharts.LineStyle.Dashed, true);
         }
         if (starts.has(trade.exit_date)) {
             const {session} = starts.get(trade.exit_date);
@@ -197,11 +203,11 @@ function drawTradeLog() {
     const body = get("trades").tBodies[0];
     body.replaceChildren();
     if (!active.trades.length) {
-        addRow(body, ["No trades for this exit scenario"]).cells[0].colSpan = 16;
+        addRow(body, ["No trades for this exit scenario"]).cells[0].colSpan = 17;
         return;
     }
     for (const trade of active.trades) {
-        const row = addRow(body, [trade.date, timestamp(trade.signal_time), timestamp(trade.entry_time),
+        const row = addRow(body, [trade.date, timestamp(trade.signal_time), timestamp(trade.bear_time), timestamp(trade.entry_time),
             price(trade.entry_price), price(trade.entry_trigger), price(trade.initial_stop), timestamp(trade.exit_time),
             price(trade.exit_price), exitNames[trade.exit_reason], count.format(trade.shares), money(trade.pnl),
             money(trade.commission), money(trade.slippage), money(trade.gap_slippage), trade.ambiguous ? "Yes" : "No",
@@ -233,16 +239,18 @@ function drawScenario() {
     const skips = Object.entries(active.skips).map(([key, value]) => `${key.replaceAll("_", " ")}: ${count.format(value)}`);
     get("skips").textContent = skips.length ? `No-trade sessions (${active.label}): ${skips.join(" · ")}` : "";
     drawTradeLog();
-    drawMonth(get("month").value);
+    const picker = get("month");
+    const previous = picker.value;
+    const months = Object.keys(data.months).filter(month => scenarioSessions(month).length);
+    picker.replaceChildren(...months.map(month => new Option(month, month)));
+    drawMonth(months.includes(previous) ? previous : data.coverage.end.slice(0, 7));
 }
 
-for (const [month] of Object.entries(data.months)) get("month").add(new Option(month, month));
-get("month").value = data.coverage.end.slice(0, 7);
 for (const item of data.scenarios) {
     get("scenario").add(new Option(item.label, item.id));
     const stats = item.stats;
     addRow(get("scenarios").tBodies[0], [item.label, count.format(stats.trades), money(stats.net_pnl),
-        pct(stats.return_pct), pct(stats.max_drawdown_pct), pct(stats.win_rate), money(stats.commission),
+        pct(stats.return_pct), pct(stats.max_drawdown_pct), pct(stats.win_rate), profitFactor(stats.profit_factor), money(stats.commission),
         money(stats.slippage), money(stats.gap_slippage), count.format(stats.ambiguous),
     ]);
 }
@@ -251,13 +259,14 @@ const {entry, account} = data.settings;
 const c = data.coverage;
 get("parameters").textContent = `${c.start} through ${c.end} · Bull signal window ${entry.entry1_start_time}–${entry.entry1_end_time} ET`
     + ` · One setup per day · ${money(account.starting_balance)} start · ${account.risk_pct}% planned risk`;
-get("coverage").textContent = `${count.format(c.signal_sessions)} signal sessions · ${count.format(c.signal_bars)} replay bars`
+get("coverage").textContent = `${count.format(c.signal_sessions)} signal sessions · ${count.format(c.signal_bars)} signal bars`
     + ` · ${count.format(c.warmup_bars)} ATR warmup bars · Published cache ${c.cache_start} through ${c.cache_end}`
     + (c.next_open_tail ? ` · ${c.next_open_tail} included only for a next-open exit` : "")
     + (c.next_open_tail_unavailable ? ` · Next open unavailable: ${c.next_open_tail_unavailable}` : "");
 get("execution").textContent = `ATR(20) carries across regular sessions; trigger/stop buffers ${entry.entry_atr_buffer}/${entry.stop_atr_buffer}. `
     + `Order activates on the following bar for up to ${entry.entry_order_valid_minutes} minutes. Slippage is at least `
-    + `${money(account.slippage_floor)} or ${account.slippage_bps} bp per fill. Ambiguous five-minute paths assume entry then stop. `
+    + `$${data.settings.account_exact?.slippage_floor ?? account.slippage_floor} or ${account.slippage_bps} bp per fill. `
+    + "Ambiguous five-minute paths assume entry then stop. "
     + "Gaps, costs and slippage can raise losses above the sizing budget.";
 get("provenance").textContent = JSON.stringify({settings: data.settings, fingerprints: data.fingerprints}, null, 2);
 benchmark.setData(data.benchmark);
