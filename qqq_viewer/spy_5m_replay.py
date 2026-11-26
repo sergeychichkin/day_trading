@@ -1,16 +1,16 @@
 """One-way Entry 1 replay using only data observable at each decision."""
 
 import math
-from dataclasses import dataclass
-from datetime import datetime, time
+from dataclasses import dataclass, replace
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Literal
 
 from .opening_range import commission, order_price
 from .sessions import NEW_YORK, Session
-from .spy_5m_store import STEP, FiveMinuteBar
+from .spy_5m_store import STEP, FiveMinuteBar, sessions
 
-ExitMode = Literal["same_day_close", "next_session_open"]
+ExitMode = Literal["same_day_close", "next_session_open", "trailing_stop"]
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,36 @@ class OrderEvent:
 
 
 @dataclass(frozen=True)
+class StopAdjustment:
+    candle_time: int
+    effective_time: int
+    old_stop: float
+    new_stop: float
+
+
+@dataclass
+class OpenPosition:
+    signal_time: int
+    bear_time: int
+    entry_time: int
+    entry_trigger: float
+    initial_stop: float
+    shares: int
+    entry_price: Decimal
+    entry_reference: float
+    active_stop: float
+    high: Decimal
+    low: Decimal
+    pending_stop: float | None = None
+    stop_adjustments: tuple[StopAdjustment, ...] = ()
+
+    def observe(self, *prices: float | Decimal) -> None:
+        values = [_decimal(price) for price in prices]
+        self.high = max(self.high, *values)
+        self.low = min(self.low, *values)
+
+
+@dataclass(frozen=True)
 class Trade:
     signal_time: int
     bear_time: int
@@ -59,6 +89,9 @@ class Trade:
     gap_slippage: float
     exit_reason: str
     ambiguous: bool
+    mfe_r: float
+    mae_r: float
+    stop_adjustments: tuple[StopAdjustment, ...]
 
 
 @dataclass(frozen=True)
@@ -66,6 +99,12 @@ class DayResult:
     trade: Trade | None
     events: list[OrderEvent]
     skip_reason: str | None = None
+    position: OpenPosition | None = None
+    later_trade: Trade | None = None
+
+    @property
+    def completed_trades(self) -> tuple[Trade, ...]:
+        return tuple(trade for trade in (self.trade, self.later_trade) if trade is not None)
 
 
 def _decimal(value) -> Decimal:
@@ -98,23 +137,47 @@ def _size(trigger: float, stop: float, equity: float | Decimal, account: Account
 
 def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | None],
                upper: float | None, equity: float | Decimal, entry: EntrySettings, account: AccountSettings,
-               exit_mode: ExitMode, *, next_open: tuple[int, float] | None = None) -> DayResult:
+               exit_mode: ExitMode, *, next_open: tuple[int, float] | None = None,
+               position: OpenPosition | None = None,
+               prior_lowers: tuple[float | None, float | None] = (None, None),
+               next_bar_open: int | None = None) -> DayResult:
     events: list[OrderEvent] = []
-    if exit_mode not in {"same_day_close", "next_session_open"}:
+    if exit_mode not in {"same_day_close", "next_session_open", "trailing_stop"}:
         raise ValueError(f"Unknown SPY exit mode: {exit_mode}")
     if len(atrs) != len(bars):
         raise ValueError("ATR and SPY bars must be aligned.")
     if exit_mode == "next_session_open" and next_open is None:
         return DayResult(None, events, "next_open_unavailable")
+    if position is not None and exit_mode != "trailing_stop":
+        raise ValueError("Only Exit 3 carries an open position.")
+
+    level = max((value for value in prior_lowers if value is not None), default=None)
+    carried_trade = None
+    first_signal_time = session.open_utc
+    if position is not None:
+        position = replace(position)
+        carried_trade = _advance(position, session, bars, atrs, 0, account, exit_mode,
+                                 next_open, next_bar_open, level, events)
+        if carried_trade is None:
+            return DayResult(None, events, position=position)
+        first_signal_time = carried_trade.exit_time
+        equity = _decimal(equity) + carried_trade.pnl
+
+    def result(trade=None, reason=None, open_position=None):
+        return DayResult(carried_trade or trade, events, reason, open_position,
+                         trade if carried_trade is not None else None)
+
     if upper is None:
-        return DayResult(None, events, "daily_upper_unavailable")
+        return result(reason="daily_upper_unavailable")
     if equity <= 0:
-        return DayResult(None, events, "cash_unavailable")
+        return result(reason="cash_unavailable")
 
     signal = None
     day_low = math.inf
     for index, (bar, atr) in enumerate(zip(bars, atrs, strict=True)):
         day_low = min(day_low, bar.low)
+        if bar.time < first_signal_time:
+            continue
         if signal is None:
             local = datetime.fromtimestamp(bar.time, NEW_YORK).time()
             if entry.entry1_start_time <= local <= entry.entry1_end_time and bar.close > max(bar.open, upper):
@@ -127,19 +190,19 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
         activate = bar.time + STEP
         if activate >= session.close_utc:
             events.append(OrderEvent(activate, "rejected", "First bear closed at the session close"))
-            return DayResult(None, events, "no_execution_window")
+            return result(reason="no_execution_window")
         if atr is None or not math.isfinite(atr) or atr < 0:
             events.append(OrderEvent(activate, "rejected", "ATR(20) not available at the bear close"))
-            return DayResult(None, events, "atr_unavailable")
+            return result(reason="atr_unavailable")
         trigger = order_price(bar.high + entry.entry_atr_buffer * atr, account.tick_size, up=True)
         stop = order_price(day_low - entry.stop_atr_buffer * atr, account.tick_size, up=False)
         if not 0 < stop < trigger:
             events.append(OrderEvent(activate, "rejected", "Nonpositive stop or stop distance", trigger, stop))
-            return DayResult(None, events, "invalid_stop")
+            return result(reason="invalid_stop")
         shares, budget = _size(trigger, stop, equity, account)
         if not shares:
             events.append(OrderEvent(activate, "rejected", "Position rounds to zero shares", trigger, stop, shares))
-            return DayResult(None, events, "cash_unavailable")
+            return result(reason="cash_unavailable")
         expiry = min(activate + entry.entry_order_valid_minutes * 60, session.close_utc)
         events.append(OrderEvent(activate, "submitted", "Buy stop and fixed protective stop", trigger, stop, shares))
         events.append(OrderEvent(activate, "activated", "Eligible from this bar's open", trigger, stop, shares))
@@ -155,51 +218,79 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
             if not _affordable(shares, entry_price, budget):
                 events.append(OrderEvent(fill_bar.time, "rejected", "Opening gap exceeds buying power",
                                          trigger, stop, shares))
-                return DayResult(None, events, "unaffordable_gap")
+                return result(reason="unaffordable_gap")
             detail = "Filled at opening reference" if at_open else "Intrabar buy-stop touch; time is bar start"
             events.append(OrderEvent(fill_bar.time, "filled", detail, trigger, stop, shares))
-            trade = _close(session, bars, offset, signal, bar.time, trigger, stop, shares, entry_price,
-                           reference, account, exit_mode, next_open)
-            events.append(OrderEvent(trade.exit_time, "closed", trade.exit_reason, trigger, stop, shares))
-            return DayResult(trade, events)
+            position = OpenPosition(signal, bar.time, fill_bar.time, trigger, stop, shares,
+                                    entry_price, reference, stop, entry_price, entry_price)
+            position.observe(reference)
+            trade = _advance(position, session, bars, atrs, offset, account, exit_mode,
+                             next_open, next_bar_open, level, events)
+            return result(trade, open_position=position if trade is None else None)
         events.append(OrderEvent(expiry, "expired", "Buy stop expired without a fill", trigger, stop, shares))
-        return DayResult(None, events, "expired")
-    return DayResult(None, events, "no_bear" if signal is not None else "no_signal")
+        return result(reason="expired")
+    return result(reason="no_bear" if signal is not None else "no_signal")
 
 
-def _close(session, bars, offset, signal, bear, trigger, stop, shares, entry_price,
-           entry_reference, account, exit_mode, next_open) -> Trade:
-    entry_bar = bars[offset]
-    ambiguous = False
-    stop_gap_possible = False
-    reason = "protective_stop"
+def _advance(position, session, bars, atrs, offset, account, exit_mode, next_open,
+             next_bar_open, level, events) -> Trade | None:
     for index in range(offset, len(bars)):
         bar = bars[index]
+        if position.pending_stop is not None:
+            position.active_stop = position.pending_stop
+            position.pending_stop = None
+        stop = position.active_stop
+        entry_bar = bar.time == position.entry_time
+        intrabar_entry = entry_bar and bar.open < position.entry_trigger
         if bar.low <= stop:
-            exit_time = bar.time
-            if index == offset:
-                # If entry was intrabar, the opening print predates it.
-                exit_reference = stop
-                ambiguous = entry_bar.open < trigger and bar.close > stop
-            else:
-                exit_reference = min(bar.open, stop)
-                stop_gap_possible = True
-            break
-    else:
-        if exit_mode == "same_day_close":
-            exit_time, exit_reference, reason = session.close_utc, bars[-1].close, "same_day_close"
-        else:
-            exit_time, exit_reference = next_open
-            stop_gap_possible = True
-            reason = "next_session_open"
+            reference = stop if entry_bar else min(bar.open, stop)
+            if not intrabar_entry:
+                position.observe(bar.open)
+            return _finish(position, bar.time, reference, account, events, "protective_stop",
+                           gap_possible=not entry_bar, ambiguous=intrabar_entry and bar.close > stop)
+        position.observe(bar.high, bar.close if intrabar_entry else bar.low)
+        atr = atrs[index]
+        if (exit_mode == "trailing_stop" and level is not None and bar.close > bar.open
+                and bar.high < level and atr is not None and math.isfinite(atr) and atr >= 0):
+            candidate = order_price(bar.low - 0.5 * atr, account.tick_size, up=False)
+            if candidate > stop:
+                effective = bars[index + 1].time if index + 1 < len(bars) else next_bar_open
+                if effective is None:
+                    day = session.date
+                    following = sessions(day + timedelta(days=1), day + timedelta(days=14))
+                    effective = following[0].open_utc
+                position.pending_stop = candidate
+                position.stop_adjustments += (StopAdjustment(bar.time, effective, stop, candidate),)
+                events.append(OrderEvent(bar.time + STEP, "stop_adjusted",
+                                         f"Raised protective stop from {stop:g} to {candidate:g}",
+                                         position.entry_trigger, candidate, position.shares))
+    if exit_mode == "trailing_stop":
+        return None
+    if exit_mode == "same_day_close":
+        return _finish(position, session.close_utc, bars[-1].close, account, events, exit_mode)
+    exit_time, exit_reference = next_open
+    return _finish(position, exit_time, exit_reference, account, events, exit_mode, gap_possible=True)
+
+
+def _finish(position, exit_time, exit_reference, account, events, reason, *,
+            gap_possible=False, ambiguous=False) -> Trade:
+    stop, shares, entry_price = position.active_stop, position.shares, position.entry_price
     exit_raw = _decimal(exit_reference)
     exit_price = exit_raw - _slip(exit_reference, account)
     if exit_price <= 0:
         raise ValueError("Modeled exit price is nonpositive; check the slippage settings.")
     fees = _decimal(commission(shares, entry_price)) + _decimal(commission(shares, exit_price))
-    exit_gap = max(Decimal(0), _decimal(stop) - exit_raw) if stop_gap_possible else Decimal(0)
-    entry_raw = _decimal(entry_reference)
-    return Trade(signal, bear, entry_bar.time, exit_time, trigger, stop, float(entry_price), float(exit_price), shares,
-                 (exit_price - entry_price) * shares - fees, float(fees),
-                 float((entry_price - entry_raw + exit_raw - exit_price) * shares),
-                 float((entry_raw - _decimal(trigger) + exit_gap) * shares), reason, ambiguous)
+    exit_gap = max(Decimal(0), _decimal(stop) - exit_raw) if gap_possible else Decimal(0)
+    entry_raw = _decimal(position.entry_reference)
+    position.observe(exit_raw, exit_price)
+    risk = entry_price - _decimal(position.initial_stop)
+    events.append(OrderEvent(exit_time, "closed", reason, position.entry_trigger, stop, shares))
+    return Trade(
+        position.signal_time, position.bear_time, position.entry_time, exit_time, position.entry_trigger,
+        position.initial_stop, float(entry_price), float(exit_price), shares,
+        (exit_price - entry_price) * shares - fees, float(fees),
+        float((entry_price - entry_raw + exit_raw - exit_price) * shares),
+        float((entry_raw - _decimal(position.entry_trigger) + exit_gap) * shares), reason, ambiguous,
+        float((position.high - entry_price) / risk), float((entry_price - position.low) / risk),
+        position.stop_adjustments,
+    )
