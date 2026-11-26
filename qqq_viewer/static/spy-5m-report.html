@@ -33,6 +33,7 @@
         <tbody></tbody>
     </table></div>
     <p class="muted">Profit factor divides total net gains by absolute total net losses. ∞ means gains without losses; — means no nonzero trades.</p>
+    <div id="open-position" hidden></div>
 </section>
 <section aria-labelledby="equity-heading">
     <h2 id="equity-heading">Equity and Drawdown</h2>
@@ -40,18 +41,24 @@
     <div id="equity"></div><p class="muted">Closed-balance drawdown</p><div id="drawdown"></div>
 </section>
 <section id="trade-chart" aria-labelledby="chart-heading" tabindex="-1">
-    <div class="toolbar"><h2 id="chart-heading">Price, Levels and Trades</h2><label>Month <select id="month"></select></label></div>
+    <div class="toolbar"><h2 id="chart-heading">Price, Levels and Trades</h2>
+        <label>Month <select id="month"></select></label>
+        <label><input type="checkbox" id="high-atr"> <span id="high-atr-label"></span></label>
+        <label><input type="checkbox" id="low-atr"> <span id="low-atr-label"></span></label>
+    </div>
     <p class="key"><span class="signal">Daily upper · Bull signal</span><span class="benchmark">Daily lower</span>
-        <span class="stress">Session VWAP</span><span class="negative">Protective stop (dashed line or single-bar dot)</span></p>
+        <span class="stress">Session VWAP</span><span class="base">Volume SMA(20)</span>
+        <span class="negative">Protective stop (dashed line or single-bar dot)</span></p>
     <p id="chart-legend"></p><div id="price"></div><p id="selected-trade" class="muted" aria-live="polite"></p>
 </section>
 <section aria-labelledby="trades-heading">
     <h2 id="trades-heading">Executed Trades Log</h2>
-    <p class="muted">Select an entry or exit to inspect that session. Intrabar fills use the containing candle's start time.</p>
+    <p class="muted">Times are New York. Intrabar fills use the candle's start time.
+        MFE and MAE use the original risk per share and prices observable while the trade was open.</p>
     <div class="scroll"><table id="trades">
-        <thead><tr><th>Entry session</th><th>Signal candle</th><th>Bear candle</th><th>Entry time</th><th>Entry fill</th><th>Trigger</th>
-            <th>Stop</th><th>Exit time</th><th>Exit fill</th><th>Exit reason</th><th>Shares</th><th>Net P&amp;L</th>
-            <th>Commission</th><th>Slippage</th><th>Adverse gap vs. trigger/stop</th><th>Ambiguous</th><th>Chart</th></tr></thead>
+        <thead><tr><th>Entry session</th><th>Signal candle</th><th>Bear candle</th><th>Entry time</th><th>Entry fill</th>
+            <th>Initial stop</th><th>Exit time</th><th>Exit fill</th><th>Exit reason</th><th>Shares</th><th>MFE (R)</th><th>MAE (R)</th>
+            <th>Net P&amp;L</th><th>Commission</th><th>Slippage</th><th>Chart</th></tr></thead>
         <tbody></tbody>
     </table></div>
 </section>

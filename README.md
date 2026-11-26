@@ -163,8 +163,16 @@ verification. It cannot generate entries and is hidden in the same-day view.
 
 The backtest uses whole shares, 1% planned risk and a cash cap by default. It charges modeled IBKR Pro Fixed commissions and configurable adverse slippage. Gap moves and five-minute path ambiguity are modeled separately; planned risk is not a guaranteed maximum loss. The report includes scenario results, equity and drawdown, a price-only buy-and-hold benchmark, session charts, and order and trade logs.
 
+The month picker loads the selected month and the next calendar month when
+the report contains both. Scroll across their boundary in the same chart.
+Volume and its 20-bar simple moving average share an overlay scale in the
+price pane. The High and Low ATR checkboxes start off. Set their multipliers
+under `[chart]` to change the guides without affecting the strategy.
 Trade and order-event buttons bring the selected session into view. The chart
-labels protective stops, same-day closes, next opens, and ambiguous stop bars.
+marks protective stops and their adjustments, same-day closes, next opens,
+and ambiguous stop bars. MFE and MAE use the simulated entry fill minus the
+original stop as 1 R. For partial bars they use only prices the replay can
+place within the holding interval.
 “Adverse gap vs. trigger/stop” is not total overnight movement: it measures
 adverse overshoot at the trigger or stop. All overnight movement is already
 reflected in net P&L.
