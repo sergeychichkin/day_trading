@@ -63,6 +63,13 @@ def test_distance_percent_is_applied_to_todays_open(refresh, tmp_path, days):
     assert bar["lower"] == pytest.approx(196)
 
 
+def test_new_daily_snapshot_identifies_yahoo_spy(refresh, tmp_path, days):
+    snapshot = run(refresh, tmp_path, prices(days[:10]))
+    assert {key: snapshot[key] for key in ("schema", "ticker", "source")} == {
+        "schema": "yahoo-daily-v1", "ticker": "SPY", "source": "Yahoo Finance",
+    }
+
+
 def test_sma_warmup_and_ema_slope_colors(refresh, tmp_path, days):
     values = [(v, v, v, v, v) for v in [*range(1, 22), 11.5, 1, 10.5]]
     bars = run(refresh, tmp_path, prices(days[:len(values)], values))["bars"]

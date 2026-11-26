@@ -35,7 +35,14 @@ that produce standalone HTML reports. See `README.md` for setup and CLI usage.
 
 ## SPY five-minute boundary
 
-SPY five-minute acquisition reads regular-hours IBKR trade bars into a separate
-SQLite cache from January 2000. The local `/spy/5m` viewer reads that cache for
-price and session VWAP and the SPY daily snapshot for session levels. Neither
-source is written by the chart server. The downloader uses no order endpoints.
+SPY five-minute acquisition stages native regular-hours IBKR trade bars, then
+publishes only an uninterrupted range to a separate SQLite cache. A refresh
+extends the installed endpoint without crossing a gap. The local `/spy/5m`
+viewer reads that cache for price and session VWAP and the SPY daily snapshot
+for levels. Neither source is written by the chart server. The downloader uses
+no order endpoints. See [measured coverage](docs/spy-5m-coverage.md) for the
+distinction between the January 2000 probe and the published start.
+
+The SPY Entry 1 backtest consumes the verified intraday cache and the Yahoo
+daily snapshot offline. It writes new standalone HTML reports and does not
+refresh either source. See the [dated reproduction steps](README.md#reproduce-the-november-24-2026-run).

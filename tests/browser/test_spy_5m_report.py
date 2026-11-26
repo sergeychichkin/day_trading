@@ -69,17 +69,22 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     expect(page.locator("#ending-equity")).to_have_text(f"${expected_equity[1]:,.2f}")
     page.get_by_role("button", name="Show entry").click()
     expect(page.locator("#month")).to_have_value("2025-11")
+    expect(page.locator("#trade-chart")).to_be_in_viewport()
     expect(page.locator("#chart-legend")).to_contain_text("Upper 101.00")
     assert "Buy" in page.evaluate("spyMarkers.map(marker => marker.text)")
     trigger = data["scenarios"][1]["trades"][0]["initial_stop"]
     assert any(points and all(point["value"] == trigger for point in points)
                for points in page.evaluate("spyPriceLines"))
+    page.get_by_role("button", name="Show event").first.click()
+    expect(page.locator("#selected-trade")).to_contain_text("Order event:")
+    expect(page.locator("#trade-chart")).to_be_in_viewport()
     page.get_by_role("button", name="Show exit").click()
     expect(page.locator("#month")).to_have_value("2025-12")
     expect(page.locator("#chart-legend")).to_contain_text("Dec 1, 2025")
-    assert "Exit" in page.evaluate("spyMarkers.map(marker => marker.text)")
+    assert "Next open" in page.evaluate("spyMarkers.map(marker => marker.text)")
     expect(page.locator("#execution")).to_contain_text("Ambiguous")
     expect(page.locator("#trades thead")).to_contain_text("Commission")
+    expect(page.locator("#trades thead")).to_contain_text("Adverse gap vs. trigger/stop")
     labels = page.evaluate("""() => {
         const format = spyPriceChart.timeScale().options().tickMarkFormatter;
         return [0 + Date.UTC(2025, 0, 6, 14, 30)/1000, Date.UTC(2025, 6, 7, 13, 30)/1000]
@@ -103,3 +108,23 @@ def test_report_handles_no_trades(page, replay_files, tmp_path):
     page.goto(output.as_uri())
     expect(page.locator("#trades")).to_contain_text("No trades for this exit scenario")
     expect(page.locator("#ending-equity")).to_have_text("$100,000.00")
+
+
+def test_stop_and_ambiguity_have_distinct_chart_markers(page, replay_files, tmp_path):
+    from qqq_viewer.backtest_spy_5m import load_settings, run
+    from qqq_viewer.spy_5m_report import write_report
+    from qqq_viewer.spy_5m_store import sessions
+
+    store, _, config = replay_files
+    day = date(2025, 11, 28)
+    session, = sessions(day, day)
+    timestamp = session.open_utc + 1200
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=101,high=105,low=96,close=104 WHERE time=?", (timestamp,))
+    output = tmp_path / "ambiguous.html"
+    write_report(output, run(load_settings(config), day, day))
+    capture_price(page)
+    page.goto(output.as_uri())
+    expect(page.locator("#trade-count")).to_have_text("1")
+    markers = page.evaluate("spyMarkers")
+    assert {m["text"] for m in markers if m["time"] == timestamp} == {"Buy", "Stop · ambiguous"}

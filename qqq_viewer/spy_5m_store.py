@@ -76,9 +76,27 @@ def normalize_bar(bar: FiveMinuteBar) -> FiveMinuteBar | None:
     return FiveMinuteBar(*values[:6], wap)
 
 
+def usable_session(session: Session, bars: list[FiveMinuteBar]) -> bool:
+    return (
+        {bar.time for bar in bars} == set(expected_times(session))
+        and any(bar.volume > 0 for bar in bars)
+        and all(bar.volume == 0 or bar.wap is not None for bar in bars)
+    )
+
+
 def _metadata(db, key):
     row = db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
     return row[0] if row else None
+
+
+def publication(db) -> tuple[str, str] | None:
+    start = _metadata(db, "verified_contiguous_start")
+    if start is None:
+        return None
+    end = _metadata(db, "verified_contiguous_end") or _metadata(db, "target")
+    if not end or end < start:
+        raise ValueError("Invalid published SPY coverage bounds.")
+    return start, end
 
 
 class FiveMinuteStore:
@@ -126,19 +144,26 @@ class FiveMinuteStore:
 
     def set_target(self, through: date) -> None:
         with self._connection(write=True) as db:
+            self._require_unpublished(db)
             db.execute("INSERT INTO metadata VALUES ('target',?) "
                        "ON CONFLICT(key) DO UPDATE SET value=max(value, excluded.value)", (through.isoformat(),))
+
+    @staticmethod
+    def _require_unpublished(db):
+        if publication(db):
+            raise ValueError("Update the published cache through qqq_viewer.spy_5m_contiguous.")
 
     def record(self, session: Session, status: str, bars: list[FiveMinuteBar], diagnostic: str = "") -> None:
         key = session.date.isoformat()
         grid = expected_times(session)
-        accepted = 0
+        accepted, confirmed = set(), {}
         with self._connection(write=True) as db:
+            self._require_unpublished(db)
             existing = {row[0]: row for row in db.execute(f"SELECT {BAR_FIELDS} FROM bars WHERE date=?", (key,))}
             for bar in bars:
                 if bar.time not in grid or (bar := normalize_bar(bar)) is None:
                     continue
-                accepted += 1
+                accepted.add(bar.time)
                 values, wap = astuple(bar), bar.wap
                 old = existing.get(bar.time)
                 if old is None:
@@ -149,14 +174,16 @@ class FiveMinuteStore:
                 elif old[6] is None and wap is not None:
                     db.execute("UPDATE bars SET wap=? WHERE time=?", (wap, bar.time))
                     existing[bar.time] = values
+                canonical = existing[bar.time]
+                if canonical[:6] == values[:6] and (bar.volume == 0 or canonical[6] == wap):
+                    confirmed[bar.time] = bar
             db.execute("INSERT INTO attempts(date,status,diagnostic,accepted) VALUES (?,?,?,?)",
-                       (key, status, diagnostic, accepted))
+                       (key, status, diagnostic, len(accepted)))
             db.execute("INSERT INTO sessions VALUES (?,?,0) "
                        "ON CONFLICT(date) DO UPDATE SET completed=max(completed, excluded.completed)",
-                       (key, int(status == "complete" and accepted > 0)))
-            valid = len(existing) == len(grid) and all(row[5] == 0 or row[6] is not None for row in existing.values())
-            if status == "complete" and accepted:
-                db.execute("UPDATE sessions SET verified=? WHERE date=?", (int(valid), key))
+                       (key, int(status == "complete" and bool(accepted))))
+            if status == "complete" and usable_session(session, list(confirmed.values())):
+                db.execute("UPDATE sessions SET verified=1 WHERE date=?", (key,))
 
     def _verified(self, db):
         return {row[0] for row in db.execute("SELECT date FROM sessions WHERE verified=1")}
@@ -183,6 +210,24 @@ class FiveMinuteStore:
         with self._connection() as db:
             value = _metadata(db, "target") or self._latest(db)
         return date.fromisoformat(value) if value else None
+
+    def _bounds(self, db) -> dict:
+        verified = publication(db)
+        latest = self._latest(db)
+        target = _metadata(db, "target") or latest
+        return {
+            "latest": latest,
+            "target": target,
+            "published_start": verified[0] if verified else None,
+            "published_through": verified[1] if verified else None,
+            "requested_through": _metadata(db, "requested_through") or target,
+        }
+
+    def bounds(self) -> dict:
+        if not self.path.is_file():
+            return dict.fromkeys(("latest", "target", "published_start", "published_through", "requested_through"))
+        with self._connection() as db:
+            return self._bounds(db)
 
     def coverage(self, target: list[Session]) -> dict:
         expected = sum(len(expected_times(session)) for session in target)

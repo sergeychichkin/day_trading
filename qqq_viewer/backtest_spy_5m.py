@@ -4,26 +4,28 @@ import argparse
 import hashlib
 import json
 import math
-import shutil
+import os
 import sqlite3
 import struct
 import sys
 import tomllib
 from collections import Counter
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from .opening_range import WilderATR
 from .sessions import NEW_YORK
 from .spy_5m_replay import AccountSettings, EntrySettings, replay_day
-from .spy_5m_store import BAR_FIELDS, FiveMinuteBar, FiveMinuteStore, expected_times, normalize_bar, sessions
+from .spy_5m_report import _validate_windows_output_name
+from .spy_5m_snapshot import SQLITE_SIDECARS, read_snapshot
+from .spy_5m_store import BAR_FIELDS, FiveMinuteBar, expected_times, normalize_bar, sessions
+from .spy_daily import DAILY_IDENTITY
 
 SPY_CONTRACT = "756733"
 BAR_FINGERPRINT = struct.Struct("!q6d?")
+LEGACY_SPY_DAILY_SHA256 = "b955d740c3111250be921f84ecbffd72c37fe2fda8c8c255496a9a27918e9577"
 LABELS = {"same_day_close": "Same-day close", "next_session_open": "Next-session open"}
 
 
@@ -46,11 +48,11 @@ def _table(config, name, allowed):
 
 
 def _numeric(value, key):
-    if type(value) not in (int, float):
+    if type(value) not in (int, float, Decimal):
         raise ValueError(f"{key} must be a finite number.")
     try:
         number = float(value)
-    except OverflowError as exc:
+    except (OverflowError, ValueError) as exc:
         raise ValueError(f"{key} must be a finite number.") from exc
     if not math.isfinite(number):
         raise ValueError(f"{key} must be a finite number.")
@@ -84,7 +86,7 @@ def _settings_entry(values):
 def load_settings(path: Path, *, entry1_start_time: str | None = None,
                   entry1_end_time: str | None = None) -> BacktestSettings:
     with path.open("rb") as file:
-        data = tomllib.load(file)
+        data = tomllib.load(file, parse_float=Decimal)
     if set(data) - {"ticker", "intraday_cache", "daily_cache", "entry1", "account", "exits"}:
         raise ValueError("SPY settings contain an unknown top-level key.")
     if data.get("ticker") != "SPY":
@@ -99,9 +101,12 @@ def load_settings(path: Path, *, entry1_start_time: str | None = None,
         if override is not None:
             values[key] = override
     entry = _settings_entry(values)
-    account = AccountSettings(**{key: _numeric(value, key)
-                                for key, value in _table(data, "account", [f.name for f in fields(AccountSettings)]).items()})
-    if account.starting_balance <= 0 or account.tick_size <= 0 or not 0 < account.risk_pct <= 100:
+    account_values = _table(data, "account", [f.name for f in fields(AccountSettings)])
+    for key, value in account_values.items():
+        finite = _numeric(value, key)
+        account_values[key] = finite if key == "tick_size" else Decimal(str(value))
+    account = AccountSettings(**account_values)
+    if float(account.starting_balance) <= 0 or account.tick_size <= 0 or not 0 < account.risk_pct <= 100:
         raise ValueError("starting_balance, tick_size, and risk_pct must be positive; risk_pct cannot exceed 100.")
     if not 0 < account.cash_cap <= 1:
         raise ValueError("cash_cap must be greater than zero and at most 1.")
@@ -124,10 +129,14 @@ def _positive(value):
 
 def _daily_snapshot(path):
     raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
     snapshot = json.loads(raw)
     rows = snapshot.get("bars") if isinstance(snapshot, dict) else None
     if not isinstance(rows, list):
         raise ValueError("SPY daily snapshot has no bars list.")
+    known_legacy = not DAILY_IDENTITY.keys() & snapshot.keys() and digest == LEGACY_SPY_DAILY_SHA256
+    if not known_legacy and any(snapshot.get(key) != value for key, value in DAILY_IDENTITY.items()):
+        raise ValueError("Invalid Yahoo Finance SPY daily snapshot identity; refresh it with qqq_viewer.spy_daily.")
     daily = {}
     for row in rows:
         if not isinstance(row, dict) or not isinstance(day := row.get("time"), str):
@@ -135,7 +144,7 @@ def _daily_snapshot(path):
         if day in daily:
             raise ValueError(f"Duplicate SPY daily snapshot date: {day}.")
         daily[day] = row
-    return daily, hashlib.sha256(raw).hexdigest()
+    return daily, digest
 
 
 def _levels(row, opening):
@@ -177,40 +186,8 @@ def _verified_bars(db, session):
     return bars
 
 
-def _file_stamp(path):
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
-        return None
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
-
-
-@contextmanager
-def _input_reader(path: Path):
-    """Replay a stable local copy; SQLite may create WAL sidecars even with mode=ro."""
-    wal, journal = (Path(str(path) + suffix) for suffix in ("-wal", "-journal"))
-    sources = (path, wal, journal)
-    before = tuple(map(_file_stamp, sources))
-    if before[0] is None:
-        raise ValueError(f"SPY intraday cache not found: {path}")
-    if before[2] is not None and before[2][2]:
-        raise ValueError("SPY intraday cache has an active rollback journal; wait for the writer and retry.")
-    with TemporaryDirectory(prefix="spy-backtest-") as directory:
-        copied = Path(directory) / "intraday.sqlite3"
-        try:
-            shutil.copyfile(path, copied)
-            if before[1] is not None and before[1][2]:
-                shutil.copyfile(wal, Path(str(copied) + "-wal"))
-        except FileNotFoundError as exc:
-            raise ValueError("SPY intraday cache changed during snapshot; retry when download is idle.") from exc
-        if tuple(map(_file_stamp, sources)) != before:
-            raise ValueError("SPY intraday cache changed during snapshot; retry when download is idle.")
-        with FiveMinuteStore(copied, read_only=True)._connection() as db:
-            yield db
-
-
 def _point(points, timestamp, balance):
-    record = {"time": timestamp, "value": balance}
+    record = {"time": timestamp, "value": float(balance)}
     if points and points[-1]["time"] == timestamp:
         points[-1] = record
     else:
@@ -247,6 +224,14 @@ def _chart_bars(bars):
 
 def _wire(settings):
     data = asdict(settings)
+    exact = {}
+    for key, value in data["account"].items():
+        if isinstance(value, Decimal):
+            data["account"][key] = float(value)
+            if Decimal(str(data["account"][key])) != value:
+                exact[key] = str(value)
+    if exact:
+        data["account_exact"] = exact
     for key in ("intraday_cache", "daily_cache"):
         data[key] = str(data[key])
     for key in ("entry1_start_time", "entry1_end_time"):
@@ -263,8 +248,9 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
         raise ValueError("Enable at least one exit.")
     cases = [{"id": mode, "label": LABELS[mode], "trades": [], "events": [], "equity": [], "skips": Counter()}
              for mode in modes]
-    initial = settings.account.starting_balance
-    balances = dict.fromkeys(modes, initial)
+    starting_cash = Decimal(str(settings.account.starting_balance))
+    initial = float(starting_cash)
+    balances = dict.fromkeys(modes, starting_cash)
     months, benchmark = {}, []
     digest = hashlib.sha256()
     atr = WilderATR(20)
@@ -273,7 +259,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     tail = None
     tail_bars = None
     tail_error = None
-    with _input_reader(settings.intraday_cache) as db:
+    with read_snapshot(settings.intraday_cache) as db:
         metadata = dict(db.execute("SELECT key,value FROM metadata"))
         if metadata.get("contract") != SPY_CONTRACT or metadata.get("volume_unit") not in {"shares", "lots"}:
             raise ValueError("The intraday cache does not identify the expected SPY contract and volume unit.")
@@ -286,6 +272,8 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
         if not first <= start <= end <= last:
             raise ValueError(f"Select a replay range within published SPY coverage {first} through {last}.")
         calendar = sessions(first, last)
+        if not calendar or calendar[0].date != first or calendar[-1].date != last:
+            raise ValueError("Published SPY endpoints must both be NYSE trading sessions.")
         signal_days = [session for session in calendar if start <= session.date <= end]
         if not signal_days:
             raise ValueError("No NYSE signal sessions in the selected date range.")
@@ -345,7 +333,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                         equity += trade.pnl
                         exit_day = datetime.fromtimestamp(trade.exit_time, NEW_YORK).date().isoformat()
                         case["trades"].append({**asdict(trade), "date": day, "exit_date": exit_day,
-                                                "equity_after": equity})
+                                                "pnl": float(trade.pnl), "equity_after": float(equity)})
                         _point(case["equity"], trade.exit_time, equity)
                         balances[mode] = equity
                     if trade is None or trade.exit_time <= session.close_utc:
@@ -365,9 +353,14 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
 
 
 def output_path(path: Path | None, settings: BacktestSettings, coverage: dict) -> Path:
-    candidate = (path or Path("output") / f"SPY_5m_entry1_{coverage['start']}_{coverage['end']}.html").resolve()
+    requested = path or Path("output") / f"SPY_5m_entry1_{coverage['start']}_{coverage['end']}.html"
+    if os.name == "nt":
+        _validate_windows_output_name(requested)
+    candidate = requested.resolve()
+    if os.name == "nt":
+        _validate_windows_output_name(candidate)
     protected = [settings.intraday_cache, settings.daily_cache]
-    protected.extend(Path(str(settings.intraday_cache) + suffix) for suffix in ("-wal", "-shm", "-journal"))
+    protected.extend(Path(str(settings.intraday_cache) + suffix) for suffix in SQLITE_SIDECARS)
     for source in protected:
         if candidate == source.resolve() or (candidate.exists() and source.exists() and candidate.samefile(source)):
             raise ValueError("Report output cannot overwrite an input cache or its sidecars.")

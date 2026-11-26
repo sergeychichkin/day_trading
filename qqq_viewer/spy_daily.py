@@ -18,6 +18,7 @@ from .sessions import NEW_YORK
 START = date(2000, 1, 1)
 DEFAULT_CACHE = Path("data/spy_daily.json")
 OHLCV = ["Open", "High", "Low", "Close", "Volume"]
+DAILY_IDENTITY = {"schema": "yahoo-daily-v1", "ticker": "SPY", "source": "Yahoo Finance"}
 
 
 def _completed_dates(now: datetime) -> list[date]:
@@ -95,7 +96,7 @@ def _snapshot(dates: list[date], source: dict[date, tuple]) -> dict:
             "volume_sma_20": sum(volumes) / 20 if len(volumes) == 20 else None,
             "ema_20": ema, "ema_direction": direction, "upper": upper, "lower": lower,
         })
-    return {"bars": bars, "missing_sessions": missing, "through": dates[-1].isoformat()}
+    return {**DAILY_IDENTITY, "bars": bars, "missing_sessions": missing, "through": dates[-1].isoformat()}
 
 
 def _write_snapshot(path: Path, snapshot: dict) -> None:

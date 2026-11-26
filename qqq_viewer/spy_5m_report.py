@@ -2,6 +2,7 @@
 
 import html
 import json
+import os
 import re
 from pathlib import Path
 
@@ -9,7 +10,16 @@ STATIC = Path(__file__).with_name("static")
 TOKENS = re.compile(r"\{\{(TITLE|CSS|PAYLOAD|LIBRARY|SCRIPT)\}\}")
 
 
+def _validate_windows_output_name(path) -> None:
+    name = os.fspath(path)
+    remainder = name[2:] if re.match(r"^[A-Za-z]:", name) else name
+    if ":" in remainder:
+        raise ValueError("The report path cannot use Windows alternate data streams.")
+
+
 def write_report(path: Path, data: dict) -> None:
+    if os.name == "nt":
+        _validate_windows_output_name(path)
     values = {
         "TITLE": html.escape(f'{data["ticker"]} Five-Minute Entry 1 Backtest'),
         "CSS": (STATIC / "opening-range.css").read_text(encoding="utf-8-sig"),

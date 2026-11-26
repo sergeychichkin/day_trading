@@ -6,13 +6,13 @@ const ny = {timeZone: "America/New_York"};
 const stamp = new Intl.DateTimeFormat("en-US", {
     ...ny, year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
-const my = new Intl.DateTimeFormat("en-US", {...ny, year: "numeric", month: "2-digit"});
+const sessionDate = new Intl.DateTimeFormat("en-US", {...ny, year: "numeric", month: "2-digit", day: "2-digit"});
 const dayTick = new Intl.DateTimeFormat("en-US", {...ny, month: "short", day: "numeric"});
 const clockTick = new Intl.DateTimeFormat("en-US", {...ny, hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
 const timestamp = time => stamp.format(time * 1000);
-const monthAt = time => {
-    const parts = Object.fromEntries(my.formatToParts(time * 1000).map(p => [p.type, p.value]));
-    return `${parts.year}-${parts.month}`;
+const dateAt = time => {
+    const parts = Object.fromEntries(sessionDate.formatToParts(time * 1000).map(p => [p.type, p.value]));
+    return `${parts.year}-${parts.month}-${parts.day}`;
 };
 const usd = new Intl.NumberFormat("en-US", {style: "currency", currency: "USD"});
 const px = new Intl.NumberFormat("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 4});
@@ -22,6 +22,7 @@ const money = n => usd.format(n);
 const pct = n => n == null ? "—" : `${n.toFixed(2)}%`;
 const colors = {up: "#10b981", down: "#ef4444", upper: "#f1c375", lower: "#7eb8f1", vwap: "#c6a1fa"};
 const exitNames = {protective_stop: "Protective stop", same_day_close: "Same-day close", next_session_open: "Next-session open"};
+const exitMarkers = {protective_stop: "Stop", same_day_close: "Day close", next_session_open: "Next open"};
 const STEP = 300;
 
 function chart(id, priceChart = false) {
@@ -99,13 +100,18 @@ function drawEvents(month) {
     const body = get("orders").tBodies[0];
     body.replaceChildren();
     get("event-month").textContent = `Events shown for ${month}`;
-    const events = active.events.filter(event => monthAt(event.time) === month);
+    const events = active.events.filter(event => dateAt(event.time).startsWith(month));
     if (!events.length) {
-        addRow(body, ["No order events for this month"]).cells[0].colSpan = 6;
+        addRow(body, ["No order events for this month"]).cells[0].colSpan = 7;
     } else {
-        for (const event of events) addRow(body, [
-            timestamp(event.time), event.action, event.detail, price(event.trigger), price(event.stop), event.shares ?? "—",
-        ]);
+        for (const event of events) {
+            const row = addRow(body, [
+                timestamp(event.time), event.action, event.detail, price(event.trigger), price(event.stop), event.shares ?? "—",
+            ]);
+            row.insertCell().append(button("Show event", () => {
+                jump(dateAt(event.time), event.time, `Order event: ${event.action} · ${timestamp(event.time)} · ${event.detail}`);
+            }));
+        }
     }
 }
 
@@ -153,7 +159,8 @@ function drawMonth(month, focusDay, focusTime) {
         if (starts.has(trade.exit_date)) {
             const {session} = starts.get(trade.exit_date);
             markers.push({time: Math.min(trade.exit_time, session.close_utc - STEP),
-                position: "aboveBar", shape: "arrowDown", color: colors.down, text: "Exit"});
+                position: "aboveBar", shape: "arrowDown", color: colors.down,
+                text: exitMarkers[trade.exit_reason] + (trade.ambiguous ? " · ambiguous" : "")});
         }
     }
     candles.setMarkers(markers.sort((a, b) => a.time - b.time));
@@ -162,12 +169,20 @@ function drawMonth(month, focusDay, focusTime) {
     drawEvents(month);
 }
 
-function jump(trade, exit) {
+function jump(day, time, description) {
+    if (get("month").value === day.slice(0, 7)) showSession(day, time);
+    else drawMonth(day.slice(0, 7), day, time);
+    get("selected-trade").textContent = description;
+    const chartSection = get("trade-chart");
+    chartSection.focus({preventScroll: true});
+    chartSection.scrollIntoView({block: "start"});
+}
+
+function jumpTrade(trade, exit) {
     const day = exit ? trade.exit_date : trade.date;
     const time = exit ? trade.exit_time : trade.entry_time;
-    drawMonth(day.slice(0, 7), day, time);
-    get("selected-trade").textContent = `${exit ? "Exit" : "Entry"}: ${timestamp(time)} · ${exitNames[trade.exit_reason]}`
-        + (trade.ambiguous ? " · Ambiguous path: simulated entry then stop" : "");
+    jump(day, time, `${exit ? "Exit" : "Entry"}: ${timestamp(time)} · ${exitNames[trade.exit_reason]}`
+        + (trade.ambiguous ? " · Ambiguous path: simulated entry then stop" : ""));
 }
 
 function button(label, click) {
@@ -191,9 +206,9 @@ function drawTradeLog() {
             price(trade.exit_price), exitNames[trade.exit_reason], count.format(trade.shares), money(trade.pnl),
             money(trade.commission), money(trade.slippage), money(trade.gap_slippage), trade.ambiguous ? "Yes" : "No",
         ]);
-        row.addEventListener("click", () => jump(trade, false));
+        row.addEventListener("click", () => jumpTrade(trade, false));
         const controls = row.insertCell();
-        controls.append(button("Show entry", () => jump(trade, false)), " ", button("Show exit", () => jump(trade, true)));
+        controls.append(button("Show entry", () => jumpTrade(trade, false)), " ", button("Show exit", () => jumpTrade(trade, true)));
     }
 }
 

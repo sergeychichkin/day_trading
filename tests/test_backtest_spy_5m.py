@@ -10,6 +10,8 @@ import pytest
 from qqq_viewer.spy_5m_store import FiveMinuteStore
 from tests.test_spy_5m_replay import tape
 
+DAILY_ID = {"schema": "yahoo-daily-v1", "ticker": "SPY", "source": "Yahoo Finance"}
+
 
 @pytest.fixture
 def runner():
@@ -32,7 +34,7 @@ def replay_files(tmp_path):
     with store._connection(write=True) as db:
         db.execute("INSERT INTO metadata VALUES ('verified_contiguous_start', ?)", (targets[0],))
     daily = tmp_path / "daily.json"
-    daily.write_text(json.dumps({"bars": [{"time": day, "open": 100, "high": 110, "low": 90, "close": 102,
+    daily.write_text(json.dumps({**DAILY_ID, "bars": [{"time": day, "open": 100, "high": 110, "low": 90, "close": 102,
                                            "upper": 101, "lower": 98} for day in targets]}), encoding="utf-8")
     config = tmp_path / "SPY.toml"
     config.write_text(f'ticker = "SPY"\nintraday_cache = "{store.path.name}"\n'
@@ -190,3 +192,114 @@ def test_input_snapshot_includes_committed_uncheckpointed_wal(runner, replay_fil
         report = runner.run(runner.load_settings(config), friday, friday)
         assert report["months"]["2025-11"][0]["bars"][0]["vwap"] == 100.25
         assert wal.read_bytes() == before
+
+
+@pytest.mark.parametrize(("starting_cash", "trade_count"), [("105.07", 3), ("105.069999999999999", 2)])
+def test_compounded_cash_remains_exact_at_the_next_order_boundary(runner, replay_files, starting_cash, trade_count):
+    store, daily, config = replay_files
+    payload = json.loads(daily.read_bytes())
+    for row in payload["bars"]:
+        row.update(open=98, upper=99, lower=97)
+    daily.write_text(json.dumps(payload), encoding="utf-8")
+    with config.open("a", encoding="utf-8") as stream:
+        stream.write(f"[account]\nstarting_balance={starting_cash}\nrisk_pct=100\nslippage_bps=0\n")
+    settings = runner.load_settings(config)
+    settings = replace(settings, next_session_open=False,
+                       entry=replace(settings.entry, entry_atr_buffer=0, stop_atr_buffer=0))
+    first, last = date(2025, 11, 26), date(2025, 12, 1)
+    with store._connection(write=True) as db:
+        for day, close_reference in [(first, 100.02), (date(2025, 11, 28), 99.99), (last, 100.03)]:
+            _, bars = tape({0: (98, 99, 97, 98), 1: (98, 99, 97, 98), 2: (98, 100, 98, 99.5),
+                            3: (99.5, 100.01, 98, 99), 4: (100.01, 101, 99, 100.5)}, day=day)
+            db.executemany("UPDATE bars SET open=?,high=?,low=?,close=? WHERE time=?",
+                           [(b.open, b.high, b.low, b.close, b.time) for b in bars[:-1]])
+            db.execute("UPDATE bars SET close=? WHERE time=?", (close_reference, bars[-1].time))
+    trades = runner.run(settings, first, last)["scenarios"][0]["trades"]
+    assert [trade["pnl"] for trade in trades[:2]] == [-2.01, -2.04]
+    assert len(trades) == trade_count
+    if trade_count == 3:
+        assert [trade["equity_after"] for trade in trades] == [103.06, 101.02, 99.02]
+        assert trades[-1]["shares"] == 1 and trades[-1]["entry_price"] == 100.02
+
+
+def test_hard_linked_input_cannot_hide_wal_updates(runner, replay_files):
+    store, _, config = replay_files
+    alias = store.path.with_name("alias.db")
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET wap=100.25 WHERE time=(SELECT MAX(time) FROM bars)")
+        db.commit()
+        os.link(store.path, alias)
+        with pytest.raises(ValueError, match="hard link"):
+            runner.run(replace(runner.load_settings(config), intraday_cache=alias))
+
+
+@pytest.mark.parametrize(("key", "value"), [("ticker", "QQQ"), ("source", "Other"), ("schema", "unknown")])
+def test_daily_snapshot_rejects_wrong_identity(runner, replay_files, key, value):
+    _, daily, config = replay_files
+    snapshot = json.loads(daily.read_bytes())
+    snapshot[key] = value
+    daily.write_text(json.dumps(snapshot), encoding="utf-8")
+    with pytest.raises(ValueError, match="identity"):
+        runner.run(runner.load_settings(config))
+
+
+def test_unknown_unlabelled_daily_snapshot_is_not_assumed_to_be_spy(runner, replay_files):
+    _, daily, config = replay_files
+    payload = json.loads(daily.read_bytes())
+    daily.write_text(json.dumps({"bars": payload["bars"]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="identity"):
+        runner.run(runner.load_settings(config))
+
+
+def test_audited_legacy_snapshot_remains_read_only(runner, replay_files, monkeypatch):
+    _, daily, config = replay_files
+    payload = json.loads(daily.read_bytes())
+    raw = json.dumps({"bars": payload["bars"]}).encode()
+    daily.write_bytes(raw)
+    monkeypatch.setattr(runner, "LEGACY_SPY_DAILY_SHA256", hashlib.sha256(raw).hexdigest(), raising=False)
+    assert runner.run(runner.load_settings(config))["fingerprints"]["daily_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert daily.read_bytes() == raw
+
+
+def test_invalid_published_endpoint_is_not_rounded_to_a_trading_day(runner, replay_files):
+    store, _, config = replay_files
+    with store._connection(write=True) as db:
+        db.execute("UPDATE metadata SET value='2025-11-27' WHERE key='target'")
+    with pytest.raises(ValueError, match="published.*NYSE|Published.*NYSE"):
+        runner.run(runner.load_settings(config))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Alternate data streams are a Windows path feature")
+def test_windows_stream_names_cannot_write_to_input(runner, replay_files):
+    from qqq_viewer.spy_5m_report import write_report
+
+    store, _, config = replay_files
+    stream = store.path.with_name(store.path.name + ":report.html")
+    settings = runner.load_settings(config)
+    with pytest.raises(ValueError, match="alternate data streams"):
+        runner.output_path(stream, settings, {})
+    with pytest.raises(ValueError, match="alternate data streams"):
+        write_report(stream, {})
+    assert runner.output_path(store.path.with_name("report.html"), settings, {}).name == "report.html"
+
+
+def test_bear_close_atr_with_overnight_gap_and_no_future_range(runner, replay_files):
+    store, _, config = replay_files
+    day = date(2025, 11, 26)
+    earlier, warm = tape(day=date(2025, 11, 25))
+    session, bars = tape({0: (104, 105, 103, 104), 1: (104, 105, 103, 104),
+                          2: (104, 106, 103, 105), 3: (105, 106, 101, 102),
+                          4: (106, 108, 101, 107)}, day=day)
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=100,high=101,low=99,close=100 WHERE date=?", (earlier.date.isoformat(),))
+        db.executemany("UPDATE bars SET open=?,high=?,low=?,close=? WHERE time=?",
+                       [(b.open, b.high, b.low, b.close, b.time) for b in bars])
+    config = runner.load_settings(config)
+    def levels():
+        scoped = runner.run(config, day, day)["scenarios"][0]
+        return next((e["trigger"], e["stop"]) for e in scoped["events"] if e["action"] == "submitted")
+    # Prior true ranges 2; then 5 (overnight gap), 2, 3, 5 → ATR 2.32610625.
+    assert levels() == (106.59, 100.41)
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET high=120,low=88 WHERE time=?", (bars[4].time,))
+    assert levels() == (106.59, 100.41)

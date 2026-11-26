@@ -53,7 +53,8 @@ backtest reports.
 ## SPY five-minute interfaces
 
 - `spy_5m_backfill.py` qualifies SPY, probes old and recent data, requests
-  bounded TWS history, and resumes unverified NYSE sessions.
+  bounded TWS history.
+- `spy_5m_contiguous.py` builds, refreshes and verifies the published range.
 - `spy_5m_store.py` owns the independent SQLite schema and NYSE 300-second
   grid. UTC bars retain broker WAP. A duplicate may fill missing WAP but
   cannot replace accepted values; conflicting revised bars are flagged.
@@ -61,3 +62,9 @@ backtest reports.
   `/api/spy/5m/month/<YYYY-MM>`. VWAP resets at the open and is unavailable
   after a gap or unusable positive-volume WAP. `upper` and `lower` come from
   the SPY daily JSON, joined on exchange-local date without rescaling.
+- `backtest_spy_5m.py` runs Entry 1 offline against the publisher's verified
+  SQLite range and the Yahoo/SPY daily snapshot. It checks cache identity and
+  published NYSE endpoints, copies SQLite inputs to a private snapshot, and
+  records both input fingerprints. `spy_5m_replay.py` models fills and keeps
+  realized P&L and sizing cash in decimal; `spy_5m_report.py` writes standalone
+  HTML exclusively to a new path.

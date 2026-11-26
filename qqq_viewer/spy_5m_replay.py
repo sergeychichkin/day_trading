@@ -24,12 +24,12 @@ class EntrySettings:
 
 @dataclass(frozen=True)
 class AccountSettings:
-    starting_balance: float = 100_000
-    risk_pct: float = 1
-    cash_cap: float = 1
+    starting_balance: float | Decimal = 100_000
+    risk_pct: float | Decimal = 1
+    cash_cap: float | Decimal = 1
     tick_size: float = 0.01
-    slippage_bps: float = 1
-    slippage_floor: float = 0.01
+    slippage_bps: float | Decimal = 1
+    slippage_floor: float | Decimal = 0.01
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ class Trade:
     entry_price: float
     exit_price: float
     shares: int
-    pnl: float
+    pnl: Decimal
     commission: float
     slippage: float
     gap_slippage: float
@@ -80,7 +80,7 @@ def _affordable(shares: int, price: Decimal, budget: Decimal) -> bool:
     return price * shares + _decimal(commission(shares, price)) <= budget
 
 
-def _size(trigger: float, stop: float, equity: float, account: AccountSettings) -> tuple[int, Decimal]:
+def _size(trigger: float, stop: float, equity: float | Decimal, account: AccountSettings) -> tuple[int, Decimal]:
     money = _decimal(equity)
     budget = money * _decimal(account.cash_cap)
     risk = money * _decimal(account.risk_pct) / 100
@@ -97,7 +97,7 @@ def _size(trigger: float, stop: float, equity: float, account: AccountSettings) 
 
 
 def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | None],
-               upper: float | None, equity: float, entry: EntrySettings, account: AccountSettings,
+               upper: float | None, equity: float | Decimal, entry: EntrySettings, account: AccountSettings,
                exit_mode: ExitMode, *, next_open: tuple[int, float] | None = None) -> DayResult:
     events: list[OrderEvent] = []
     if exit_mode not in {"same_day_close", "next_session_open"}:
@@ -180,7 +180,7 @@ def _close(session, bars, offset, signal, bear, trigger, stop, shares, entry_pri
             if index == offset:
                 # If entry was intrabar, the opening print predates it.
                 exit_reference = stop
-                ambiguous = entry_bar.open < trigger
+                ambiguous = entry_bar.open < trigger and bar.close > stop
             else:
                 exit_reference = min(bar.open, stop)
                 stop_gap_possible = True
@@ -200,6 +200,6 @@ def _close(session, bars, offset, signal, bear, trigger, stop, shares, entry_pri
     exit_gap = max(Decimal(0), _decimal(stop) - exit_raw) if stop_gap_possible else Decimal(0)
     entry_raw = _decimal(entry_reference)
     return Trade(signal, bear, entry_bar.time, exit_time, trigger, stop, float(entry_price), float(exit_price), shares,
-                 float((exit_price - entry_price) * shares - fees), float(fees),
+                 (exit_price - entry_price) * shares - fees, float(fees),
                  float((entry_price - entry_raw + exit_raw - exit_price) * shares),
                  float((entry_raw - _decimal(trigger) + exit_gap) * shares), reason, ambiguous)

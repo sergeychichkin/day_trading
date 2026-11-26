@@ -39,3 +39,11 @@ generated HTML.
 They display UTC data in New York time, show missing candle slots rather than
 filling them, and draw separate VWAP and daily level lines for each session.
 The month selection counter prevents older responses from changing the view.
+
+## SPY five-minute Entry 1 report
+
+`spy-5m-report.html` and `spy-5m-report.js` render the offline replay payload
+with embedded chart assets. Trade and order-event controls focus the price
+chart on the selected session. Exit and ambiguity markers distinguish chart
+events; the gap-cost column excludes overnight movement that does not pass
+the trigger or stop.

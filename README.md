@@ -115,16 +115,15 @@ The replay verifies the ticker and session bounds for canonical bars and complet
 Open TWS with socket clients enabled. Use the port and volume unit configured in TWS; the example below uses port `7497` and volume in shares. The download sends historical data and contract requests only.
 
 ```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_backfill --port 7497 --volume-unit shares --probe
-.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_backfill --port 7497 --volume-unit shares
+.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_contiguous --port 7497 --volume-unit shares
 .\.venv\Scripts\python.exe -m qqq_viewer.server --port 8765
 ```
 
-Run the second command only if the probe passes. It starts at the first NYSE session in January 2000 and can resume without requesting already verified sessions. It writes `data/spy_5m.sqlite3`. If using custom paths, match the downloader's `--db` to the server's `--spy-5m-db`, and match the downloader's `--daily-cache` to the server's `--spy-cache`.
+The same download command builds a fresh cache or refreshes an existing published range. A fresh build checks months backward from the last completed NYSE session to find the uninterrupted range; a refresh checks forward from the installed endpoint and cannot advance past an incomplete session. It resumes staged work in `data/spy_5m_contiguous_audit.sqlite3` and publishes verified bars to `data/spy_5m.sqlite3`. Use `--through YYYY-MM-DD` to fix the cutoff; use `--floor YYYY-MM-DD` on a fresh build to change the earliest date considered (default `2004-01-23`). A gap that blocks the requested cutoff is reported and leaves later bars in staging. Use a separate `--staging-db` for separate viewer caches. Match the downloader's `--db` to the server's `--spy-5m-db`; the server's `--spy-cache` selects the Yahoo daily snapshot.
 
 Open [the separate five-minute viewer](http://127.0.0.1:8765/spy/5m). The Month picker opens the first cached session; drag horizontally to browse the selected month. The purple line is session VWAP, using IBKR's five-minute weighted prices and volume. A missing bar or unavailable weighted price on a positive-volume bar stops VWAP until the next open. The amber and blue lines copy the SPY daily upper and lower levels by New York session date. If the chart detects a price-scale mismatch after a daily refresh, it hides the affected levels and shows a warning; candles and VWAP remain available. The coverage footer separates missing bars, unverified sessions, and conflicting values. The viewer uses local files and works with TWS closed.
 
-**Live probe on November 25, 2026:** TWS qualified SPY as contract `756733` (ARCA) and returned all 78 five-minute bars with positive volume and weighted prices for November 24, 2026. A browser check using a temporary cache displayed this session's VWAP and both levels from the daily snapshot. The January 3–7, 2000 weekly probe and a separate January 3 one-day request both returned error 162 (“HMDS query returned no data”). TWS's head timestamp of January 29, 1993 is not specific to five-minute bars. The bulk backfill was not started and no substitute start date was used.
+**Published coverage verified November 25, 2026:** December 24, 2013 through November 24, 2026; **3,249 sessions and 252,450 bars**, with no missing, unverified, or conflicting bars. January 23, 2004 was the earliest observed full session, but the older data had gaps. See the [dated probe and coverage record](docs/spy-5m-coverage.md) for evidence and the offline verification command.
 
 ## SPY five-minute Entry 1 backtest
 
@@ -140,3 +139,45 @@ Run the replay from the repository root with the verified intraday cache and SPY
 To compare same-day close and next-session open, copy the TOML alongside the original, enable `next_session_open` in `[exits]`, and give the run a distinct `--output`. Each enabled exit compounds independently. A next-open exit can use the verified opening just beyond `--end`; if there is no next verified session, that final day is excluded from next-open entries. The report states the actual signal range and any exit-only date. Existing reports are not overwritten.
 
 The backtest uses whole shares, 1% planned risk and a cash cap by default. It charges modeled IBKR Pro Fixed commissions and configurable adverse slippage. Gap moves and five-minute path ambiguity are modeled separately; planned risk is not a guaranteed maximum loss. The report includes scenario results, equity and drawdown, a price-only buy-and-hold benchmark, session charts, and order and trade logs.
+
+Trade and order-event buttons bring the selected session into view. The chart
+labels protective stops, same-day closes, next opens, and ambiguous stop bars.
+“Adverse gap vs. trigger/stop” is not total overnight movement: it measures
+adverse overshoot at the trigger or stop. All overnight movement is already
+reflected in net P&L.
+
+### Reproduce the November 24, 2026 run
+
+On a fresh checkout, install the package as described above. Use the archived
+inputs for an exact reproduction. To rebuild with current provider data, use
+the [dated TWS publisher command](docs/spy-5m-coverage.md#published-uninterrupted-range)
+and download Yahoo levels with `python -m qqq_viewer.spy_daily --cache
+data/spy_daily_rebuild.json`. Point a copy of `config/SPY.toml` at those two
+rebuild files; the commands use separate paths so they do not replace installed
+caches. A provider rebuild may differ from the archived inputs.
+
+With the archived inputs at the paths in `config/SPY.toml`, run these from
+the repository root. If a report already exists, choose a new output name.
+
+```powershell
+$python = ".\.venv\Scripts\python.exe"
+& $python -m qqq_viewer.backtest_spy_5m --config config/SPY.toml --start 2013-12-24 --end 2026-11-24 --output output/SPY_5m_entry1_2013-12-24_2026-11-24_replay.html
+$comparison = "config/SPY_exit_comparison_replay.toml"
+if (Test-Path $comparison) { throw "Choose an unused comparison config path." }
+(Get-Content config/SPY.toml -Raw).Replace("next_session_open = false", "next_session_open = true") | Set-Content -Encoding ascii $comparison
+& $python -m qqq_viewer.backtest_spy_5m --config $comparison --start 2013-12-24 --end 2026-11-24 --output output/SPY_5m_entry1_exit_comparison_2013-12-24_2026-11-24_replay.html
+```
+
+Expected archived-input coverage: **3,249 signal sessions and 252,450 bars**;
+**71 trades** in each exit scenario. Under **Settings and input fingerprints**,
+compare these SHA-256 values (the intraday hash covers the replay bars, not
+the SQLite file bytes):
+
+- Intraday: `37d8a0626c5d9d1ea470bb358dde7713dad60f6828c0dcfa9c864682cc18cc29`
+- Daily: `b955d740c3111250be921f84ecbffd72c37fe2fda8c8c255496a9a27918e9577`
+
+New daily snapshots identify themselves as SPY/Yahoo Finance (`yahoo-daily-v1`).
+The runner accepts the exact archived legacy daily file by its fingerprint,
+without modifying it. Refresh any other unlabeled file to a new path rather
+than assuming its ticker or changing its metadata by hand. The archived market
+data itself is not in Git.

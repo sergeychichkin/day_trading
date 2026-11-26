@@ -101,3 +101,19 @@ def test_exact_cash_boundary_is_affordable_at_submission_and_fill(replay):
     account = replace(replay.AccountSettings(), risk_pct=100, slippage_bps=0)
     result = replay.replay_day(day, bars, [2] * len(bars), 99, 101.02, entry, account, "same_day_close")
     assert result.trade.shares == 1 and result.trade.entry_price == 100.02
+
+
+@pytest.mark.parametrize(("close", "ambiguous"), [(97, False), (97.5, False), (98, True)])
+def test_ambiguity_requires_a_close_above_the_stop(replay, close, ambiguous):
+    trade = simulate(replay, {4: (101, 105, 96, close)}).trade
+    assert trade.exit_price == pytest.approx(97.49)
+    assert trade.ambiguous is ambiguous
+
+
+@pytest.mark.parametrize("outcome", ["stop", "rejection"])
+def test_no_rearm_after_a_stop_or_gap_rejection(replay, outcome):
+    later = {5: (100, 104, 98, 103), 6: (103, 104, 98, 100), 7: (105, 110, 102, 109)}
+    fill = (103, 105, 96, 101) if outcome == "stop" else (800, 801, 799, 800)
+    result = simulate(replay, {4: fill, **later}, entry=replace(replay.EntrySettings(), entry1_end_time=time(10, 30)))
+    assert sum(event.action == "submitted" for event in result.events) == 1
+    assert bool(result.trade) == (outcome == "stop")
