@@ -320,7 +320,7 @@ function drawScenario() {
     equity.timeScale().fitContent();
     drawdown.timeScale().fitContent();
     const skips = Object.entries(active.skips).map(([key, value]) => `${key.replaceAll("_", " ")}: ${count.format(value)}`);
-    get("skips").textContent = skips.length ? `No-trade sessions (${active.label}): ${skips.join(" · ")}` : "";
+    get("skips").textContent = skips.length ? `New-entry skips (${active.label}) · ${skips.join(" · ")}` : "";
     drawTradeLog();
     drawOpenPosition();
     const picker = get("month");

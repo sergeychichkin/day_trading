@@ -293,3 +293,16 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     assert points in page.evaluate("spyPriceLines")
     expect(page.locator("#open-position")).to_contain_text("Unrealized P&L")
     expect(page.locator("#open-position")).to_contain_text(scenario["open_position"]["entry_date"])
+
+
+def test_report_labels_skips_as_new_entry_outcomes(page, replay_files, tmp_path):
+    from qqq_viewer.backtest_spy_5m import load_settings, run
+    from qqq_viewer.spy_5m_report import write_report
+
+    _, _, config = replay_files
+    payload = run(load_settings(config))
+    payload["scenarios"][0]["skips"]["no_signal"] = 1
+    output = tmp_path / "entry-skips.html"
+    write_report(output, payload)
+    page.goto(output.as_uri())
+    expect(page.locator("#skips")).to_contain_text("New-entry skips")

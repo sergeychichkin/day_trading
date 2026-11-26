@@ -309,6 +309,32 @@ def test_exit3_cutoff_retains_pending_stop_and_ignores_legacy_tail(runner, repla
     )
 
 
+def test_exit3_checks_verified_prior_retained_before_publication(runner, replay_files):
+    store, daily, config = replay_files
+    prior, bars = tape({0: (94, 101, 93, 100)}, day=date(2025, 11, 24))
+    with store._connection(write=True) as db:
+        db.execute("DELETE FROM metadata WHERE key='verified_contiguous_start'")
+    store.record(prior, "complete", bars)
+    with store._connection(write=True) as db:
+        db.execute("INSERT INTO metadata VALUES ('verified_contiguous_start', '2025-11-25')")
+    payload = json.loads(daily.read_bytes())
+    payload["bars"].insert(0, {"time": "2025-11-24", "open": 100, "lower": 99})
+    daily.write_text(json.dumps(payload), encoding="utf-8")
+    settings = replace(runner.load_settings(config), trailing_stop=True, next_session_open=False)
+    data = runner.run(settings)
+    first = data["months"]["2025-11"][0]
+    assert first["prior_lowers"][0] == {
+        "date": "2025-11-24", "lower": None, "status": "opening_price_mismatch",
+    }
+    assert data["coverage"]["cache_start"] == "2025-11-25"
+    assert first["bars"][0]["atr"] is None
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=96 WHERE time=?", (bars[0].time,))
+    revised = runner.run(settings)
+    assert revised["months"]["2025-11"][0]["prior_lowers"][0]["lower"] == 99
+    assert revised["fingerprints"]["intraday_sha256"] != data["fingerprints"]["intraday_sha256"]
+
+
 @pytest.mark.parametrize("damage", ["missing", "conflict"])
 def test_run_refuses_unverified_warmup_or_signal_input(runner, replay_files, damage):
     store, _, config = replay_files

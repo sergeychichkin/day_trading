@@ -217,6 +217,12 @@ def _verified_bars(db, session):
     return bars
 
 
+def _fingerprint_bars(digest, bars):
+    for bar in bars:
+        digest.update(BAR_FINGERPRINT.pack(bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume,
+                                           bar.wap if bar.wap is not None else 0, bar.wap is not None))
+
+
 def _point(points, timestamp, balance):
     record = {"time": timestamp, "value": float(balance)}
     if points and points[-1]["time"] == timestamp:
@@ -341,7 +347,17 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
             before_cache = sessions(first - timedelta(days=14), first - timedelta(days=1))
             for session in before_cache[-2:]:
                 day = session.date.isoformat()
-                prior_levels.appendleft(_prior_lower(day, daily.get(day, {}), None))
+                row = daily.get(day, {})
+                level = _prior_lower(day, row, None)
+                if level["lower"] is not None:
+                    try:
+                        prior_bars = _verified_bars(db, session)
+                    except ValueError:
+                        pass  # No verified five-minute open for this pre-publication session.
+                    else:
+                        _fingerprint_bars(digest, prior_bars)
+                        level = _prior_lower(day, row, prior_bars[0].open)
+                prior_levels.appendleft(level)
         if settings.trailing_stop or settings.next_session_open:
             candidate = next(iter(sessions(signal_end + timedelta(days=1), signal_end + timedelta(days=14))), None)
         if settings.next_session_open:
@@ -366,9 +382,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
         for i, session in enumerate(days):
             following = days[i + 1] if i + 1 < len(days) else None
             next_bars = (tail_bars if following == tail else _verified_bars(db, following)) if following else None
-            for bar in bars:
-                digest.update(BAR_FINGERPRINT.pack(bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume,
-                                                   bar.wap if bar.wap is not None else 0, bar.wap is not None))
+            _fingerprint_bars(digest, bars)
             atrs = [atr.update(bar) for bar in bars]
             volume_averages = []
             for bar in bars:
