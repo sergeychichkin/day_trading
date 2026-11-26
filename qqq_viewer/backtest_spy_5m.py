@@ -9,13 +9,13 @@ import sqlite3
 import struct
 import sys
 import tomllib
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from .opening_range import WilderATR
+from .opening_range import WilderATR, commission
 from .sessions import NEW_YORK
 from .spy_5m_replay import AccountSettings, EntrySettings, replay_day
 from .spy_5m_report import _validate_windows_output_name
@@ -26,7 +26,14 @@ from .spy_daily import DAILY_IDENTITY
 SPY_CONTRACT = "756733"
 BAR_FINGERPRINT = struct.Struct("!q6d?")
 LEGACY_SPY_DAILY_SHA256 = "b955d740c3111250be921f84ecbffd72c37fe2fda8c8c255496a9a27918e9577"
-LABELS = {"same_day_close": "Same-day close", "next_session_open": "Next-session open"}
+LABELS = {"same_day_close": "Same-day close", "next_session_open": "Next-session open",
+          "trailing_stop": "Exit 3 · Trailing stop"}
+
+
+@dataclass(frozen=True)
+class ChartSettings:
+    high_atr_multiplier: float = 0.25
+    low_atr_multiplier: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,8 @@ class BacktestSettings:
     account: AccountSettings
     same_day_close: bool
     next_session_open: bool
+    trailing_stop: bool = False
+    chart: ChartSettings = ChartSettings()
 
 
 def _table(config, name, allowed):
@@ -83,11 +92,10 @@ def _settings_entry(values):
     return entry
 
 
-def load_settings(path: Path, *, entry1_start_time: str | None = None,
-                  entry1_end_time: str | None = None) -> BacktestSettings:
+def load_settings(path: Path) -> BacktestSettings:
     with path.open("rb") as file:
         data = tomllib.load(file, parse_float=Decimal)
-    if set(data) - {"ticker", "intraday_cache", "daily_cache", "entry1", "account", "exits"}:
+    if set(data) - {"ticker", "intraday_cache", "daily_cache", "entry1", "account", "exits", "chart"}:
         raise ValueError("SPY settings contain an unknown top-level key.")
     if data.get("ticker") != "SPY":
         raise ValueError("The five-minute runner currently supports only a verified SPY cache.")
@@ -97,9 +105,6 @@ def load_settings(path: Path, *, entry1_start_time: str | None = None,
             raise ValueError(f"Set {key} to an input path.")
         inputs.append((path.parent / data[key]).resolve())
     values = _table(data, "entry1", [field.name for field in fields(EntrySettings)])
-    for key, override in (("entry1_start_time", entry1_start_time), ("entry1_end_time", entry1_end_time)):
-        if override is not None:
-            values[key] = override
     entry = _settings_entry(values)
     account_values = _table(data, "account", [f.name for f in fields(AccountSettings)])
     for key, value in account_values.items():
@@ -112,11 +117,16 @@ def load_settings(path: Path, *, entry1_start_time: str | None = None,
         raise ValueError("cash_cap must be greater than zero and at most 1.")
     if not 0 <= account.slippage_bps < 10_000 or account.slippage_floor < 0:
         raise ValueError("Slippage must be nonnegative and slippage_bps below 10,000.")
-    exits = dict(same_day_close=True, next_session_open=False)
+    chart = _table(data, "chart", [field.name for field in fields(ChartSettings)])
+    for key, value in chart.items():
+        chart[key] = _numeric(value, key)
+        if chart[key] < 0:
+            raise ValueError(f"{key} cannot be negative.")
+    exits = dict(same_day_close=True, next_session_open=False, trailing_stop=False)
     exits.update(_table(data, "exits", exits))
     if any(type(value) is not bool for value in exits.values()) or not any(exits.values()):
         raise ValueError("Enable at least one exit with boolean settings.")
-    return BacktestSettings("SPY", *inputs, entry, account, **exits)
+    return BacktestSettings("SPY", *inputs, entry, account, chart=ChartSettings(**chart), **exits)
 
 
 def _positive(value):
@@ -147,20 +157,41 @@ def _daily_snapshot(path):
     return daily, digest
 
 
+def _opening_matches(daily_open, opening):
+    return abs(Decimal(str(opening)) - Decimal(str(daily_open))) <= Decimal(str(daily_open)) * Decimal("0.05")
+
+
+def _lower_level(row, daily_open):
+    lower = _positive(row.get("lower"))
+    return lower if lower is not None and 0.5 <= lower / daily_open <= 1 else None
+
+
 def _levels(row, opening):
     if row is None:
         return None, None, "daily_upper_unavailable"
     daily_open = _positive(row.get("open"))
     if daily_open is None:
         return None, None, "daily_open_unavailable"
-    if abs(Decimal(str(opening)) - Decimal(str(daily_open))) > Decimal(str(daily_open)) * Decimal("0.05"):
+    if not _opening_matches(daily_open, opening):
         return None, None, "opening_price_mismatch"
-    upper, lower = _positive(row.get("upper")), _positive(row.get("lower"))
-    if lower is not None and not 0.5 <= lower / daily_open <= 1:
-        lower = None
+    upper, lower = _positive(row.get("upper")), _lower_level(row, daily_open)
     if upper is None or not 1 <= upper / daily_open <= 2:
         return None, lower, "daily_upper_unavailable"
     return upper, lower, "available" if lower is not None else "daily_lower_unavailable"
+
+
+def _prior_lower(day, row, opening):
+    daily_open = _positive(row.get("open"))
+    lower = _lower_level(row, daily_open) if daily_open is not None else None
+    if lower is None:
+        return {"date": day, "lower": None, "status": "daily_lower_unavailable"}
+    if opening is None:
+        status = "daily_only_before_intraday_coverage"
+    elif _opening_matches(daily_open, opening):
+        status = "verified"
+    else:
+        lower, status = None, "opening_price_mismatch"
+    return {"date": day, "lower": lower, "status": status}
 
 
 def _verified_bars(db, session):
@@ -215,14 +246,15 @@ def _stats(case, starting):
     }
 
 
-def _chart_bars(bars):
+def _chart_bars(bars, atrs, volume_averages):
     weighted = volume = 0.0
     rows = []
-    for bar in bars:
+    for bar, atr, average in zip(bars, atrs, volume_averages, strict=True):
         if bar.volume:
             weighted += bar.wap * bar.volume
             volume += bar.volume
-        rows.append({**asdict(bar), "vwap": weighted / volume if volume else None})
+        rows.append({**asdict(bar), "vwap": weighted / volume if volume else None,
+                     "atr": atr, "volume_sma_20": average})
     return rows
 
 
@@ -243,6 +275,23 @@ def _wire(settings):
     return data
 
 
+def _ny_date(timestamp):
+    return datetime.fromtimestamp(timestamp, NEW_YORK).date().isoformat()
+
+
+def _position_mark(position, session, close):
+    entry_fee = Decimal(str(commission(position.shares, position.entry_price)))
+    pnl = (Decimal(str(close)) - position.entry_price) * position.shares - entry_fee
+    return {
+        "entry_time": position.entry_time, "entry_date": _ny_date(position.entry_time),
+        "signal_time": position.signal_time, "bear_time": position.bear_time,
+        "entry_price": float(position.entry_price), "initial_stop": position.initial_stop,
+        "active_stop": position.active_stop, "pending_stop": position.pending_stop,
+        "shares": position.shares, "stop_adjustments": [asdict(item) for item in position.stop_adjustments],
+        "mark_price": close, "mark_time": session.close_utc, "unrealized_pnl": float(pnl),
+    }
+
+
 def run(settings: BacktestSettings, start: date | None = None, end: date | None = None) -> dict:
     if settings.ticker != "SPY":
         raise ValueError("The five-minute runner supports only SPY.")
@@ -250,7 +299,8 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     modes = [key for key in LABELS if getattr(settings, key)]
     if not modes:
         raise ValueError("Enable at least one exit.")
-    cases = [{"id": mode, "label": LABELS[mode], "trades": [], "events": [], "equity": [], "skips": Counter()}
+    cases = [{"id": mode, "label": LABELS[mode], "trades": [], "events": [], "equity": [],
+              "skips": Counter(), "open_position": None}
              for mode in modes]
     starting_cash = Decimal(str(settings.account.starting_balance))
     initial = float(starting_cash)
@@ -258,6 +308,9 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     months, benchmark = {}, []
     digest = hashlib.sha256()
     atr = WilderATR(20)
+    volumes = deque(maxlen=20)
+    prior_levels = deque(maxlen=2)
+    position = None
     benchmark_open = None
     warmup_bars = signal_bars = 0
     tail = None
@@ -282,9 +335,16 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
         if not signal_days:
             raise ValueError("No NYSE signal sessions in the selected date range.")
         days = [session for session in calendar if session.date <= signal_days[-1].date]
-        if "next_session_open" in modes:
-            signal_end = signal_days[-1].date
+        signal_end = signal_days[-1].date
+        candidate = None
+        if settings.trailing_stop:
+            before_cache = sessions(first - timedelta(days=14), first - timedelta(days=1))
+            for session in before_cache[-2:]:
+                day = session.date.isoformat()
+                prior_levels.appendleft(_prior_lower(day, daily.get(day, {}), None))
+        if settings.trailing_stop or settings.next_session_open:
             candidate = next(iter(sessions(signal_end + timedelta(days=1), signal_end + timedelta(days=14))), None)
+        if settings.next_session_open:
             if candidate is None:
                 tail_error = "No next NYSE session found in the exchange calendar lookup."
             else:
@@ -310,16 +370,27 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                 digest.update(BAR_FINGERPRINT.pack(bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume,
                                                    bar.wap if bar.wap is not None else 0, bar.wap is not None))
             atrs = [atr.update(bar) for bar in bars]
+            volume_averages = []
+            for bar in bars:
+                volumes.append(bar.volume)
+                volume_averages.append(math.fsum(volumes) / 20 if len(volumes) == 20 else None)
+            day = session.date.isoformat()
+            priors = list(prior_levels)
+            if settings.trailing_stop and session != tail:
+                prior_levels.appendleft(_prior_lower(day, daily.get(day, {}), bars[0].open))
             if session.date < start:
                 warmup_bars += len(bars)
                 bars = next_bars
                 continue
-            day = session.date.isoformat()
             upper, lower, level_status = _levels(daily.get(day), bars[0].open)
-            months.setdefault(day[:7], []).append({
+            chart_session = {
                 "date": day, "open_utc": session.open_utc, "close_utc": session.close_utc, "upper": upper, "lower": lower,
-                "levels_status": level_status, "bars": _chart_bars(bars), "exit_only": session == tail,
-            })
+                "levels_status": level_status, "bars": _chart_bars(bars, atrs, volume_averages),
+                "exit_only": session == tail,
+            }
+            if settings.trailing_stop and session != tail:
+                chart_session["prior_lowers"] = priors
+            months.setdefault(day[:7], []).append(chart_session)
             if session != tail:
                 signal_bars += len(bars)
                 if benchmark_open is None:
@@ -332,25 +403,34 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                     equity = balances[mode]
                     if not case["equity"]:
                         _point(case["equity"], session.open_utc, equity)
-                    result = replay_day(session, bars, atrs, upper, equity, settings.entry, settings.account,
-                                        mode, next_open=next_open)
+                    trailing = mode == "trailing_stop"
+                    upcoming = following or candidate
+                    result = replay_day(
+                        session, bars, atrs, upper, equity, settings.entry, settings.account, mode,
+                        next_open=next_open, position=position if trailing else None,
+                        prior_lowers=tuple(item["lower"] for item in priors) if trailing else (None, None),
+                        next_bar_open=upcoming.open_utc if trailing and upcoming else None,
+                    )
+                    if trailing:
+                        position = result.position
+                        if position is not None and session.date == signal_end:
+                            case["open_position"] = _position_mark(position, session, bars[-1].close)
                     reason = result.skip_reason
                     if reason == "daily_upper_unavailable":
                         reason = level_status
                     if reason:
                         case["skips"][reason] += 1
-                    case["events"].extend({**asdict(event), "date": day} for event in result.events)
-                    trade = result.trade
-                    if trade is not None:
+                    case["events"].extend({**asdict(event), "date": _ny_date(event.time)} for event in result.events)
+                    for trade in result.completed_trades:
                         if trade.exit_time > session.close_utc:
                             _point(case["equity"], session.close_utc, equity)
                         equity += trade.pnl
-                        exit_day = datetime.fromtimestamp(trade.exit_time, NEW_YORK).date().isoformat()
-                        case["trades"].append({**asdict(trade), "date": day, "exit_date": exit_day,
+                        case["trades"].append({**asdict(trade), "date": _ny_date(trade.entry_time),
+                                                "exit_date": _ny_date(trade.exit_time),
                                                 "pnl": float(trade.pnl), "equity_after": float(equity)})
                         _point(case["equity"], trade.exit_time, equity)
                         balances[mode] = equity
-                    if trade is None or trade.exit_time <= session.close_utc:
+                    if not result.completed_trades or result.completed_trades[-1].exit_time <= session.close_utc:
                         _point(case["equity"], session.close_utc, equity)
             bars = next_bars
     for case in cases:
@@ -405,13 +485,11 @@ def main(argv=None) -> int:
     parser.add_argument("--start", type=date.fromisoformat)
     parser.add_argument("--end", type=date.fromisoformat)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--entry1-start-time", help="Override the first qualifying candle's New York start time.")
-    parser.add_argument("--entry1-end-time", help="Override the last qualifying candle's New York start time.")
     args = parser.parse_args(argv)
     try:
         from .spy_5m_report import write_report
 
-        settings = load_settings(args.config, entry1_start_time=args.entry1_start_time, entry1_end_time=args.entry1_end_time)
+        settings = load_settings(args.config)
         path = output_path(args.output, settings, config_path=args.config) if args.output is not None else None
         data = run(settings, args.start, args.end)
         if path is None:

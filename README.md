@@ -135,16 +135,27 @@ Run the replay from the repository root with the verified intraday cache and SPY
 
 ```powershell
 .\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml
-.\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml --entry1-start-time 09:35 --entry1-end-time 10:00 --start 2020-01-01 --end 2020-12-31 --output output/SPY_5m_2020_0935-1000.html
+.\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml --start 2020-01-01 --end 2020-12-31 --output output/SPY_5m_2020_exit3.html
 ```
 
 [`config/SPY.toml`](config/SPY.toml) controls the entry window, the two ATR buffers, the order lifetime, equity and risk, and execution costs. Signal times label five-minute candle **starts**, in New York time. Only the first qualifying bull close can arm a setup; the first later bear can occur after the signal window. At the bear close the runner fixes the buy trigger and protective stop from the information available then, including the low so far, before allowing a fill on the next bar. The order cannot survive its expiry or the regular-session close.
 
-TOML accepts quoted times such as `"09:30"` or local time literals such as
-`09:30:00` on the same five-minute grid. `--entry1-start-time` and
-`--entry1-end-time` override their corresponding TOML values.
+Set `entry1_start_time` and `entry1_end_time` in `[entry1]`. TOML accepts
+quoted times such as `"09:30"` or local time literals such as `09:30:00` on
+the same five-minute grid.
 
-To compare same-day close and next-session open, copy the TOML alongside the original, enable `next_session_open` in `[exits]`, and give the run a distinct `--output`. Each enabled exit compounds independently. A next-open exit can use the verified opening just beyond `--end`; if there is no next verified session, that final day is excluded from next-open entries. The report states the actual signal range and any exit-only date. Existing reports are not overwritten.
+Exit 3 is enabled by default. One position can stay open across regular sessions
+until its protective stop is hit. If a bull candle's high is below either of the
+two preceding sessions' daily lower levels, the stop can rise to the candle low
+minus half its ATR(20), rounded down to a tick and effective from the next bar.
+The report shows any position still open at the replay cutoff.
+
+To run the legacy exits, copy the TOML alongside the original and enable
+`same_day_close` or `next_session_open` in `[exits]`. Set `trailing_stop = false`
+for a legacy-only run and choose a distinct `--output`. Each enabled exit
+compounds independently. If the next verified session is unavailable, the final
+signal day is excluded from next-open entries. The report gives the actual
+signal range and any exit-only date.
 
 The immediate next NYSE session may be used for an exit even beyond the
 published signal range, but only if its cached bars independently pass
@@ -177,10 +188,13 @@ the repository root. If a report already exists, choose a new output name.
 
 ```powershell
 $python = ".\.venv\Scripts\python.exe"
-& $python -m qqq_viewer.backtest_spy_5m --config config/SPY.toml --start 2013-12-24 --end 2026-11-24 --output output/SPY_5m_entry1_2013-12-24_2026-11-24_replay.html
+$sameDay = "config/SPY_same_day_replay.toml"
 $comparison = "config/SPY_exit_comparison_replay.toml"
-if (Test-Path $comparison) { throw "Choose an unused comparison config path." }
-(Get-Content config/SPY.toml -Raw).Replace("next_session_open = false", "next_session_open = true") | Set-Content -Encoding ascii $comparison
+if ((Test-Path $sameDay) -or (Test-Path $comparison)) { throw "Choose unused replay config paths." }
+$legacy = (Get-Content config/SPY.toml -Raw).Replace("same_day_close = false", "same_day_close = true").Replace("trailing_stop = true", "trailing_stop = false")
+$legacy | Set-Content -Encoding ascii $sameDay
+$legacy.Replace("next_session_open = false", "next_session_open = true") | Set-Content -Encoding ascii $comparison
+& $python -m qqq_viewer.backtest_spy_5m --config $sameDay --start 2013-12-24 --end 2026-11-24 --output output/SPY_5m_entry1_2013-12-24_2026-11-24_replay.html
 & $python -m qqq_viewer.backtest_spy_5m --config $comparison --start 2013-12-24 --end 2026-11-24 --output output/SPY_5m_entry1_exit_comparison_2013-12-24_2026-11-24_replay.html
 ```
 

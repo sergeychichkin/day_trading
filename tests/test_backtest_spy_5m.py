@@ -47,7 +47,8 @@ def test_config_defaults_and_validation(runner, tmp_path):
     assert (cfg.entry.entry1_start_time, cfg.entry.entry1_end_time) == (time(9, 30), time(9, 40))
     assert (cfg.entry.entry_atr_buffer, cfg.entry.stop_atr_buffer, cfg.entry.entry_order_valid_minutes) == (0.25, 0.25, 120)
     assert (cfg.account.starting_balance, cfg.account.risk_pct, cfg.account.cash_cap) == (100000, 1, 1)
-    assert cfg.same_day_close and not cfg.next_session_open
+    assert cfg.trailing_stop and not (cfg.same_day_close or cfg.next_session_open)
+    assert (cfg.chart.high_atr_multiplier, cfg.chart.low_atr_multiplier) == (0.25, 0.5)
     assert cfg.intraday_cache == Path("data/spy_5m.sqlite3").resolve()
     path = tmp_path / "settings.toml"
     for custom, match in [
@@ -57,6 +58,7 @@ def test_config_defaults_and_validation(runner, tmp_path):
         ('[account]\nstarting_balance=nan', "finite"),
         ('[account]\ncash_cap=2', "cash_cap"),
         ('[exits]\nsame_day_close=false', "exit"),
+        ('[chart]\nlow_atr_multiplier=-1', "negative"),
     ]:
         path.write_text('ticker="SPY"\nintraday_cache="cache.db"\ndaily_cache="daily.json"\n' + custom, encoding="utf-8")
         with pytest.raises(ValueError, match=match):
@@ -127,18 +129,24 @@ def test_cli_rejects_invalid_output_before_running(runner, replay_files, monkeyp
         assert protected.read_bytes() == original
 
 
-def test_cli_default_output_and_time_overrides(runner, replay_files, monkeypatch, capsys):
+def test_cli_default_output_and_toml_times(runner, replay_files, monkeypatch, capsys):
     _, _, config = replay_files
     monkeypatch.chdir(config.parent)
     with config.open("a", encoding="utf-8") as stream:
-        stream.write('[entry1]\nentry1_start_time="09:30"\nentry1_end_time="09:35"\n')
-    assert runner.main(["--config", str(config), "--start", "2025-11-28", "--end", "2025-11-28",
-                        "--entry1-start-time", "09:40", "--entry1-end-time", "09:45"]) == 0
+        stream.write('[entry1]\nentry1_start_time="09:35"\nentry1_end_time="09:45"\n'
+                     '[chart]\nhigh_atr_multiplier=0.75\n')
+    args = ["--config", str(config), "--start", "2025-11-28", "--end", "2025-11-28"]
+    for flag in ("--entry1-start-time", "--entry1-end-time"):
+        with pytest.raises(SystemExit) as failure:
+            runner.main([*args, flag, "09:40"])
+        assert failure.value.code == 2
+    assert runner.main(args) == 0
     output = Path("output/SPY_5m_entry1_2025-11-28_2025-11-28.html")
     payload = json.loads(output.read_text(encoding="utf-8")
                          .split('id="report-data" type="application/json">', 1)[1].split("</script>", 1)[0])
     entry = payload["settings"]["entry"]
-    assert (entry["entry1_start_time"], entry["entry1_end_time"]) == ("09:40", "09:45")
+    assert (entry["entry1_start_time"], entry["entry1_end_time"]) == ("09:35", "09:45")
+    assert payload["settings"]["chart"]["high_atr_multiplier"] == 0.75
     assert "1 trades" in capsys.readouterr().out
 
 
@@ -224,6 +232,81 @@ def test_exit_modes_compound_independently_and_use_only_verified_next_open(runne
     assert runner.output_path(None, settings, result["coverage"]).name == "SPY_5m_entry1_2025-11-26_2025-11-28.html"
     with pytest.raises(ValueError, match="SPY"):
         runner.run(replace(settings, ticker="QQQ"))
+
+
+def test_exit3_resolves_exact_prior_sessions_and_warmup_volume(runner, replay_files):
+    store, daily, config = replay_files
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=94, low=93 WHERE date='2025-11-25' "
+                   "AND time=(SELECT MIN(time) FROM bars WHERE date='2025-11-25')")
+        db.execute("UPDATE bars SET volume=40 WHERE date IN ('2025-11-25', '2025-11-26')")
+    payload = json.loads(daily.read_bytes())
+    payload["bars"].insert(0, {"time": "2025-11-24", "open": 100, "lower": 99})
+    payload["bars"] = [row for row in payload["bars"] if row["time"] != "2025-11-26"]
+    daily.write_text(json.dumps(payload), encoding="utf-8")
+    settings = replace(runner.load_settings(config), trailing_stop=True, next_session_open=False)
+    full = runner.run(settings)
+    day25, day26, friday = full["months"]["2025-11"]
+    monday, = full["months"]["2025-12"]
+    assert day25["prior_lowers"][0] == {
+        "date": "2025-11-24", "lower": 99, "status": "daily_only_before_intraday_coverage",
+    }
+    assert day26["prior_lowers"][0]["status"] == "opening_price_mismatch"
+    assert friday["prior_lowers"] == [
+        {"date": "2025-11-26", "lower": None, "status": "daily_lower_unavailable"},
+        {"date": "2025-11-25", "lower": None, "status": "opening_price_mismatch"},
+    ]
+    assert [row["date"] for row in monday["prior_lowers"]] == ["2025-11-28", "2025-11-26"]
+    subset = runner.run(settings, date(2025, 11, 28))
+    assert subset["months"]["2025-11"] == [friday]
+    assert subset["months"]["2025-12"] == [monday]
+    assert friday["bars"][0]["volume_sma_20"] == (19 * 40 + 10) / 20
+
+
+def test_exit3_cutoff_retains_pending_stop_and_ignores_legacy_tail(runner, replay_files):
+    store, daily, config = replay_files
+    friday = date(2025, 11, 28)
+    session, _ = tape(day=friday)
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=99,high=100.8,low=99,close=100.2 WHERE time=?",
+                   (session.close_utc - 300,))
+    payload = json.loads(daily.read_bytes())
+    payload["bars"][1].update(open=101, lower=100.9)
+    daily.write_text(json.dumps(payload), encoding="utf-8")
+    settings = replace(runner.load_settings(config), trailing_stop=True, same_day_close=False)
+    result = runner.run(settings, friday, friday)
+    legacy, trailing = result["scenarios"]
+    assert result["coverage"]["next_open_tail"] == "2025-12-01"
+    assert legacy["trades"][0]["exit_date"] == "2025-12-01"
+    assert trailing["trades"] == [] and trailing["stats"]["net_pnl"] == 0
+    position = trailing["open_position"]
+    assert position["active_stop"] < position["pending_stop"]
+    assert position["mark_time"] == session.close_utc
+    assert position["unrealized_pnl"] == pytest.approx(
+        (100.2 - position["entry_price"]) * position["shares"] - 1,
+    )
+    assert position["stop_adjustments"][-1]["effective_time"] == result["months"]["2025-12"][0]["open_utc"]
+
+    monday = date(2025, 12, 1)
+    monday_session, monday_bars = tape({
+        0: (97, 105, 96, 104), 1: (104, 105, 99, 101),
+        2: (107, 108, 100, 107), 3: (107, 108, 94, 106),
+    }, day=monday)
+    with store._connection(write=True) as db:
+        db.executemany("UPDATE bars SET open=?,high=?,low=?,close=? WHERE time=?", [
+            (bar.open, bar.high, bar.low, bar.close, bar.time) for bar in monday_bars[:4]
+        ])
+    extended = runner.run(settings, friday, monday)["scenarios"][1]
+    first, second = extended["trades"]
+    assert first["date"] == friday.isoformat() and first["exit_time"] == monday_session.open_utc
+    assert second["date"] == monday.isoformat() and first["exit_time"] < second["entry_time"]
+    assert first["equity_after"] == pytest.approx(100000 + first["pnl"])
+    assert second["equity_after"] == pytest.approx(first["equity_after"] + second["pnl"])
+    assert extended["stats"]["net_pnl"] == pytest.approx(first["pnl"] + second["pnl"])
+    assert extended["open_position"] is None
+    assert [point["time"] for point in extended["equity"]] == sorted(
+        {point["time"] for point in extended["equity"]}
+    )
 
 
 @pytest.mark.parametrize("damage", ["missing", "conflict"])

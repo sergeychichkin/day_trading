@@ -18,5 +18,10 @@ slippage_bps = 1
 slippage_floor = 0.01
 
 [exits]
-same_day_close = true
+same_day_close = false
 next_session_open = false
+trailing_stop = true
+
+[chart]
+high_atr_multiplier = 0.25
+low_atr_multiplier = 0.5
