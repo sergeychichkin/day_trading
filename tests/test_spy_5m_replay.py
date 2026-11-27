@@ -23,11 +23,11 @@ def tape(overrides=None, day=date(2025, 11, 26)):
 
 
 def simulate(replay, overrides=None, *, entry=None, account=None, mode="same_day_close",
-             day=date(2025, 11, 26), next_open=None):
+             day=date(2025, 11, 26), next_open=None, session_lower=97.5):
     session, bars = tape(overrides, day)
     return replay.replay_day(session, bars, [2] * len(bars), 101, 100000,
                              entry or replay.EntrySettings(), account or replay.AccountSettings(), mode,
-                             next_open=next_open)
+                             next_open=next_open, session_lower=session_lower)
 
 
 def test_first_bull_and_first_later_bear_own_the_only_setup(replay):
@@ -38,6 +38,41 @@ def test_first_bull_and_first_later_bear_own_the_only_setup(replay):
     assert (trade.signal_time, trade.bear_time) == (session.open_utc + 600, session.open_utc + 900)
     assert (trade.entry_trigger, trade.initial_stop, trade.shares) == (102.5, 97.5, 200)
     assert simulate(replay, {2: (100, 101, 99, 100), 3: (100, 103, 99, 102)}).trade is None
+
+
+@pytest.mark.parametrize("mode", ["same_day_close", "next_session_open", "trailing_stop"])
+def test_session_lower_sets_initial_stop_and_size(replay, mode):
+    for low in (98, 95):
+        session, bars = tape({0: (100, 101, low, 100), 4: (103, 105, 100, 104)})
+        following, _ = tape(day=date(2025, 11, 28))
+        result = replay.replay_day(session, bars, [2] * len(bars), 101, 100000,
+                                   replay.EntrySettings(), replay.AccountSettings(), mode,
+                                   session_lower=97.509, next_open=(following.open_utc, 104))
+        trade = result.trade or result.position
+        assert (trade.entry_trigger, trade.initial_stop, trade.shares) == (102.5, 97.5, 200)
+
+
+@pytest.mark.parametrize(("lower", "reason"), [
+    (None, "daily_lower_unavailable"), (102.5, "invalid_stop"),
+    (0.001, "invalid_stop"), (float("nan"), "invalid_stop"),
+])
+def test_unusable_session_lower_rejects_new_order(replay, lower, reason):
+    session, bars = tape({4: (103, 105, 100, 104)})
+    result = replay.replay_day(session, bars, [2] * len(bars), 101, 100000,
+                               replay.EntrySettings(), replay.AccountSettings(), "same_day_close",
+                               session_lower=lower)
+    assert result.skip_reason == reason
+    assert result.trade is None
+    assert [event.action for event in result.events] == ["signal", "rejected"]
+
+
+def test_carried_stop_executes_without_current_session_lower(replay):
+    session, bars = tape({0: (97, 100, 96, 100)}, day=date(2025, 11, 28))
+    result = replay.replay_day(session, bars, [2] * len(bars), 101, 100000,
+                               replay.EntrySettings(), replay.AccountSettings(), "trailing_stop",
+                               session_lower=None, position=entered_wednesday(replay))
+    trade, = result.completed_trades
+    assert (trade.exit_reason, trade.exit_time) == ("protective_stop", session.open_utc)
 
 
 def test_order_activates_on_next_bar_and_expires_exclusive(replay):
@@ -64,11 +99,11 @@ def test_size_and_costs_use_only_submission_inputs(replay):
     tight = {0: (104.7, 105, 104.6, 104.7), 1: (104.7, 105, 104.6, 104.7),
              2: (104.7, 105.5, 104.7, 105.25), 3: (105.2, 105.5, 104.8, 105),
              4: (105.5, 106.1, 104.5, 105.8)}
-    no_buffers = replace(replay.EntrySettings(), entry_atr_buffer=0, stop_atr_buffer=0)
-    affordable = simulate(replay, tight, entry=no_buffers).trade
+    no_entry_buffer = replace(replay.EntrySettings(), entry_atr_buffer=0)
+    affordable = simulate(replay, tight, entry=no_entry_buffer, session_lower=104.6).trade
     assert affordable.shares == 947
     tight[4] = (120, 121, 119, 120)
-    rejected = simulate(replay, tight, entry=no_buffers)
+    rejected = simulate(replay, tight, entry=no_entry_buffer, session_lower=104.6)
     assert rejected.trade is None and any(event.action == "rejected" for event in rejected.events)
 
 
@@ -97,9 +132,10 @@ def test_stop_at_open_and_ambiguous_entry_bar_have_distinct_fills(replay):
 def test_exact_cash_boundary_is_affordable_at_submission_and_fill(replay):
     day, bars = tape({0: (98, 99, 97, 98), 1: (98, 99, 97, 98), 2: (98, 100, 98, 99.5),
                       3: (99.5, 100.01, 98, 99), 4: (100.01, 101, 99, 100.5)})
-    entry = replace(replay.EntrySettings(), entry_atr_buffer=0, stop_atr_buffer=0)
+    entry = replace(replay.EntrySettings(), entry_atr_buffer=0)
     account = replace(replay.AccountSettings(), risk_pct=100, slippage_bps=0)
-    result = replay.replay_day(day, bars, [2] * len(bars), 99, 101.02, entry, account, "same_day_close")
+    result = replay.replay_day(day, bars, [2] * len(bars), 99, 101.02, entry, account, "same_day_close",
+                               session_lower=97)
     assert result.trade.shares == 1 and result.trade.entry_price == 100.02
 
 
@@ -120,13 +156,13 @@ def test_no_rearm_after_a_stop_or_gap_rejection(replay, outcome):
 
 
 def trail(replay, overrides, *, day=date(2025, 11, 28), atr=1.01, lowers=(105, 107),
-          next_bar_open=None, position=None, upper=101):
+          next_bar_open=None, position=None, upper=101, session_lower=98):
     session, bars = tape(overrides, day)
     return replay.replay_day(
         session, bars, [atr] * len(bars), upper, 100000,
-        replace(replay.EntrySettings(), entry_atr_buffer=0, stop_atr_buffer=0),
+        replace(replay.EntrySettings(), entry_atr_buffer=0),
         replace(replay.AccountSettings(), slippage_bps=0, slippage_floor=0),
-        "trailing_stop", position=position, prior_lowers=lowers, next_bar_open=next_bar_open,
+        "trailing_stop", session_lower=session_lower, position=position, prior_lowers=lowers, next_bar_open=next_bar_open,
     )
 
 
@@ -212,7 +248,7 @@ def test_closing_bar_adjustment_survives_weekend(replay):
     result = trail(replay, {0: (97, 105, 96, 104), 1: (104, 105, 99, 101),
                             2: (106, 108, 100, 107), 3: (107, 109, 105, 108),
                             4: (107, 108, 95, 106)},
-                   day=monday, position=friday.position, lowers=(110, 111))
+                   day=monday, position=friday.position, lowers=(110, 111), session_lower=96)
     first, second = result.completed_trades
     assert first.exit_time == session.open_utc and first.exit_price == 97
     assert first.gap_slippage == pytest.approx((103 - 102 + 103.49 - 97) * first.shares)
@@ -241,8 +277,8 @@ def test_excursions_use_only_execution_interval(replay, low, mode, expected):
         3: (99.5, 100, 98, 99), 4: (99, 104, low, 101),
         **{index: (101, 102, 100, 101) for index in range(5, 78)},
     })
-    entry = replace(replay.EntrySettings(), entry_atr_buffer=0, stop_atr_buffer=0)
+    entry = replace(replay.EntrySettings(), entry_atr_buffer=0)
     account = replace(replay.AccountSettings(), slippage_floor=0, slippage_bps=0)
     result = replay.replay_day(session, bars, [2] * len(bars), 99, 100000, entry, account,
-                               mode, next_open=(session.close_utc + 60000, 97))
+                               mode, session_lower=98, next_open=(session.close_utc + 60000, 97))
     assert (result.trade.mfe_r, result.trade.mae_r) == expected

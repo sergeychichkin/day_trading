@@ -142,7 +142,7 @@ A run starts flat with the configured cash at its first signal session.
 The earlier history supplies indicator warmup and prior daily levels.
 Moving `--start` into an existing trade's dates starts a fresh replay.
 
-[`config/SPY.toml`](config/SPY.toml) controls the entry window, the two ATR buffers, the order lifetime, equity and risk, and execution costs. Signal times label five-minute candle **starts**, in New York time. Only the first qualifying bull close can arm a setup; the first later bear can occur after the signal window. At the bear close the runner fixes the buy trigger and protective stop from the information available then, including the low so far, before allowing a fill on the next bar. The order cannot survive its expiry or the regular-session close.
+[`config/SPY.toml`](config/SPY.toml) controls the entry window, the buy trigger's ATR buffer, the order lifetime, equity and risk, and execution costs. Signal times label five-minute candle **starts**, in New York time. Only the first qualifying bull close can arm a setup. The first later bear can occur after the signal window. At the bear close the runner sets the buy trigger to the bear high plus the ATR buffer, rounded up to the configured tick. It sets the initial protective stop to the session's plotted daily Lower, rounded down to the tick, and sizes the order from that stop. A missing Lower or a rounded stop outside the valid range prevents submission. The order becomes eligible on the next bar and expires by the regular-session close.
 
 Set `entry1_start_time` and `entry1_end_time` in `[entry1]`. TOML accepts
 quoted times such as `"09:30"` or local time literals such as `09:30:00` on
@@ -150,8 +150,8 @@ the same five-minute grid.
 
 Exit 3 is enabled by default. One position can stay open across regular sessions
 until its protective stop is hit. The entry session uses the original stop.
-On the first following NYSE session, a stop raise can use only the entry
-session's daily lower. On later sessions, either of the two immediately
+The first following NYSE session checks the same daily Lower that set the
+initial stop, so that level cannot raise it. On later sessions, either of the two immediately
 preceding sessions' valid daily lowers can qualify. If a bull candle's high is
 strictly below an eligible lower, the stop can rise to the candle low minus half
 its ATR(20), floored to a tick and effective from the next bar. The report shows

@@ -9,6 +9,7 @@ import sqlite3
 import struct
 import sys
 import tomllib
+import warnings
 from collections import Counter, deque
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time, timedelta
@@ -77,11 +78,10 @@ def _settings_entry(values):
                 values[key] = time.fromisoformat(values[key])
             except (ValueError, TypeError) as exc:
                 raise ValueError(f"{key} must be a five-minute New York candle time.") from exc
-    for key in ("entry_atr_buffer", "stop_atr_buffer"):
-        if key in values:
-            values[key] = _numeric(values[key], key)
-            if values[key] < 0:
-                raise ValueError(f"{key} cannot be negative.")
+    if "entry_atr_buffer" in values:
+        values["entry_atr_buffer"] = _numeric(values["entry_atr_buffer"], "entry_atr_buffer")
+        if values["entry_atr_buffer"] < 0:
+            raise ValueError("entry_atr_buffer cannot be negative.")
     entry = EntrySettings(**values)
     start, end = entry.entry1_start_time, entry.entry1_end_time
     if any(t.tzinfo is not None or t.second or t.microsecond or t.minute % 5 for t in (start, end)):
@@ -106,7 +106,11 @@ def load_settings(path: Path) -> BacktestSettings:
         if not isinstance(data.get(key), str) or not data[key].strip():
             raise ValueError(f"Set {key} to an input path.")
         inputs.append((path.parent / data[key]).resolve())
-    values = _table(data, "entry1", [field.name for field in fields(EntrySettings)])
+    values = _table(data, "entry1", [field.name for field in fields(EntrySettings)] + ["stop_atr_buffer"])
+    if "stop_atr_buffer" in values:
+        del values["stop_atr_buffer"]
+        warnings.warn("entry1.stop_atr_buffer is ignored. Entry 1 uses the session's daily Lower.",
+                      UserWarning, stacklevel=2)
     entry = _settings_entry(values)
     account_values = _table(data, "account", [f.name for f in fields(AccountSettings)])
     for key, value in account_values.items():
@@ -504,7 +508,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                     upcoming = following or candidate
                     result = replay_day(
                         session, bars, atrs, chart_session["upper"], equity, settings.entry, settings.account, mode,
-                        next_open=next_open, position=position if trailing else None,
+                        session_lower=chart_session["lower"], next_open=next_open, position=position if trailing else None,
                         prior_lowers=tuple(item["lower"] for item in priors) if trailing else (None, None),
                         previous_session_date=previous_session_date if trailing else None,
                         next_bar_open=upcoming.open_utc if trailing and upcoming else None,

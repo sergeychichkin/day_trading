@@ -45,7 +45,7 @@ def replay_files(tmp_path):
 def test_config_defaults_and_validation(runner, tmp_path):
     cfg = runner.load_settings(Path("config/SPY.toml"))
     assert (cfg.entry.entry1_start_time, cfg.entry.entry1_end_time) == (time(9, 30), time(9, 40))
-    assert (cfg.entry.entry_atr_buffer, cfg.entry.stop_atr_buffer, cfg.entry.entry_order_valid_minutes) == (0.25, 0.25, 120)
+    assert (cfg.entry.entry_atr_buffer, cfg.entry.entry_order_valid_minutes) == (0.25, 120)
     assert (cfg.account.starting_balance, cfg.account.risk_pct, cfg.account.cash_cap) == (100000, 1, 1)
     assert cfg.trailing_stop and not (cfg.same_day_close or cfg.next_session_open)
     assert (cfg.chart.high_atr_multiplier, cfg.chart.low_atr_multiplier) == (0.25, 0.5)
@@ -95,6 +95,35 @@ def test_overlap_keeps_atr_and_ignores_current_daily_high_low_close(runner, repl
     assert missing["trades"] == [] and missing["skips"]["daily_upper_unavailable"] == 1
     with pytest.raises(ValueError, match="published"):
         runner.run(cfg, date(2025, 11, 24), november28)
+
+
+def test_runner_uses_plotted_daily_lower_or_skips(runner, replay_files):
+    _, daily, config = replay_files
+    day = date(2025, 11, 28)
+    settings = runner.load_settings(config)
+    payload = json.loads(daily.read_bytes())
+    row = next(row for row in payload["bars"] if row["time"] == day.isoformat())
+    row["lower"] = 98.009
+    daily.write_text(json.dumps(payload), encoding="utf-8")
+    data = runner.run(settings, day, day)
+    assert data["months"]["2025-11"][0]["lower"] == 98.009
+    assert all(case["trades"][0]["initial_stop"] == 98.0 for case in data["scenarios"])
+
+    for lower in (None, 101):
+        row["lower"] = lower
+        daily.write_text(json.dumps(payload), encoding="utf-8")
+        data = runner.run(settings, day, day)
+        assert all(not case["trades"] and case["skips"]["daily_lower_unavailable"] == 1
+                   for case in data["scenarios"])
+
+
+def test_legacy_stop_atr_buffer_warns_and_is_ignored(runner, replay_files):
+    _, _, config = replay_files
+    with config.open("a", encoding="utf-8") as stream:
+        stream.write("[entry1]\nstop_atr_buffer = 0.25\n")
+    with pytest.warns(UserWarning, match="stop_atr_buffer.*ignored"):
+        settings = runner.load_settings(config)
+    assert not hasattr(settings.entry, "stop_atr_buffer")
 
 
 def test_trade_daily_stats_use_previous_nyse_session_and_reset_at_gaps(runner, replay_files):
@@ -310,16 +339,17 @@ def test_exit3_resolves_exact_prior_sessions_and_warmup_volume(runner, replay_fi
     assert friday["bars"][0]["volume_sma_20"] == (19 * 40 + 10) / 20
 
 
-def test_exit3_cutoff_retains_pending_stop_and_ignores_legacy_tail(runner, replay_files):
+def test_exit3_entry_lower_prevents_first_following_raise_and_ignores_legacy_tail(runner, replay_files):
     store, daily, config = replay_files
     wednesday = date(2025, 11, 26)
     friday = date(2025, 11, 28)
     session, _ = tape(day=friday)
     with store._connection(write=True) as db:
-        db.execute("UPDATE bars SET open=99,high=100.8,low=99,close=100.2 WHERE time=?",
-                   (session.close_utc - 300,))
+        db.execute("UPDATE bars SET low=99 WHERE time=?", (session.open_utc,))
+        db.execute("UPDATE bars SET open=101.1,high=102,low=101,close=101.2 WHERE time>=? AND time<?",
+                   (session.open_utc + 1500, session.close_utc))
     payload = json.loads(daily.read_bytes())
-    payload["bars"][1].update(open=101, lower=100.9)
+    payload["bars"][2].update(open=101, lower=100.9)
     daily.write_text(json.dumps(payload), encoding="utf-8")
     settings = replace(runner.load_settings(config), trailing_stop=True, same_day_close=False)
     entry_case = runner.run(settings, wednesday, wednesday)["scenarios"][1]
@@ -336,19 +366,28 @@ def test_exit3_cutoff_retains_pending_stop_and_ignores_legacy_tail(runner, repla
     assert legacy["trades"][-1]["exit_date"] == "2025-12-01"
     assert trailing["trades"] == [] and trailing["stats"]["net_pnl"] == 0
     position = trailing["open_position"]
-    assert position["active_stop"] < position["pending_stop"]
-    assert position["stop_adjustments"][-1]["prior_session_count"] == 1
+    assert position["active_stop"] == position["initial_stop"] == 98
+    assert position["pending_stop"] is None
+    assert position["stop_adjustments"] == []
     assert position["mark_time"] == session.close_utc
     assert position["unrealized_pnl"] == pytest.approx(
-        (100.2 - position["entry_price"]) * position["shares"] - 1,
+        (101.2 - position["entry_price"]) * position["shares"] - max(1, position["shares"] * 0.005),
     )
-    assert position["stop_adjustments"][-1]["effective_time"] == result["months"]["2025-12"][0]["open_utc"]
-
     monday = date(2025, 12, 1)
     monday_session, monday_bars = tape({
-        0: (97, 105, 96, 104), 1: (104, 105, 99, 101),
-        2: (107, 108, 100, 107), 3: (107, 108, 94, 106),
+        0: (100, 100.8, 99.8, 100.7), 1: (97, 105, 96, 104),
+        2: (104, 105, 99, 101), 3: (107, 108, 94, 106),
     }, day=monday)
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET low=99 WHERE time=?", (monday_session.open_utc,))
+        db.execute("UPDATE bars SET open=100,high=100.8,low=99.8,close=100.7 WHERE time=?",
+                   (monday_session.close_utc - 300,))
+    cutoff = runner.run(settings, wednesday, monday)["scenarios"][1]["open_position"]
+    assert cutoff["active_stop"] == 98 < cutoff["pending_stop"]
+    adjustment, = cutoff["stop_adjustments"]
+    assert adjustment["prior_session_count"] == 2
+    assert adjustment["effective_time"] == runner.sessions(date(2025, 12, 2), date(2025, 12, 2))[0].open_utc
+
     with store._connection(write=True) as db:
         db.executemany("UPDATE bars SET open=?,high=?,low=?,close=? WHERE time=?", [
             (bar.open, bar.high, bar.low, bar.close, bar.time) for bar in monday_bars[:4]
@@ -356,7 +395,9 @@ def test_exit3_cutoff_retains_pending_stop_and_ignores_legacy_tail(runner, repla
     extended_data = runner.run(settings, wednesday, monday)
     extended = extended_data["scenarios"][1]
     first, second = extended["trades"]
-    assert first["date"] == wednesday.isoformat() and first["exit_time"] == monday_session.open_utc
+    assert first["date"] == wednesday.isoformat() and first["exit_time"] == monday_session.open_utc + 300
+    adjustment, = first["stop_adjustments"]
+    assert adjustment["prior_session_count"] == 2 and adjustment["effective_time"] == first["exit_time"]
     assert second["date"] == monday.isoformat() and first["exit_time"] < second["entry_time"]
     assert second["stop_adjustments"] == ()
     assert first["equity_after"] == pytest.approx(100000 + first["pnl"])
@@ -515,7 +556,7 @@ def test_compounded_cash_remains_exact_at_the_next_order_boundary(runner, replay
         stream.write(f"[account]\nstarting_balance={starting_cash}\nrisk_pct=100\nslippage_bps=0\n")
     settings = runner.load_settings(config)
     settings = replace(settings, next_session_open=False,
-                       entry=replace(settings.entry, entry_atr_buffer=0, stop_atr_buffer=0))
+                       entry=replace(settings.entry, entry_atr_buffer=0))
     first, last = date(2025, 11, 26), date(2025, 12, 1)
     with store._connection(write=True) as db:
         for day, close_reference in [(first, 100.02), (date(2025, 11, 28), 99.99), (last, 100.03)]:
@@ -609,7 +650,7 @@ def test_bear_close_atr_with_overnight_gap_and_no_future_range(runner, replay_fi
         scoped = runner.run(config, day, day)["scenarios"][0]
         return next((e["trigger"], e["stop"]) for e in scoped["events"] if e["action"] == "submitted")
     # Prior true ranges 2; then 5 (overnight gap), 2, 3, 5 → ATR 2.32610625.
-    assert levels() == (106.59, 100.41)
+    assert levels() == (106.59, 98.0)
     with store._connection(write=True) as db:
         db.execute("UPDATE bars SET high=120,low=88 WHERE time=?", (bars[4].time,))
-    assert levels() == (106.59, 100.41)
+    assert levels() == (106.59, 98.0)

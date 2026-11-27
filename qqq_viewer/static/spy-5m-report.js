@@ -430,13 +430,14 @@ get("coverage").textContent = `${count.format(c.signal_sessions)} signal session
     + (c.retained_inputs.length ? " · See input coverage for retained sessions" : "")
     + (c.next_open_tail ? ` · ${c.next_open_tail} included only for a next-open exit (${count.format(c.exit_only_bars)} bars)` : "")
     + (c.next_open_tail_unavailable ? ` · Next open unavailable: ${c.next_open_tail_unavailable}` : "");
-get("execution").textContent = `ATR(20) carries across regular sessions; trigger/stop buffers ${entry.entry_atr_buffer}/${entry.stop_atr_buffer}. `
+get("execution").textContent = `ATR(20) carries across regular sessions. The entry trigger buffer is ${entry.entry_atr_buffer} × ATR(20). `
+    + "Initial stop uses the entry session's daily Lower rounded down to the configured tick. "
     + `Order activates on the following bar for up to ${entry.entry_order_valid_minutes} minutes. Slippage is at least `
     + `$${data.settings.account_exact?.slippage_floor ?? account.slippage_floor} or ${account.slippage_bps} bp per fill. `
     + "Ambiguous five-minute paths assume entry then stop. "
     + "Gaps, costs and slippage can raise losses above the sizing budget."
-    + (data.settings.trailing_stop ? " Exit 3 keeps the original stop on the entry session. A stop raise uses the entry session’s daily lower"
-        + " on the first following NYSE session and either of the two preceding daily lowers on later sessions."
+    + (data.settings.trailing_stop ? " Exit 3 keeps the original stop on the entry session. The first following NYSE session checks the same Lower,"
+        + " which cannot raise the stop. Later sessions can use either of the two preceding daily Lowers."
         + " A higher stop applies from the next bar." : "");
 get("provenance").textContent = JSON.stringify({settings: data.settings, fingerprints: data.fingerprints, coverage: c}, null, 2);
 benchmark.setData(data.benchmark);

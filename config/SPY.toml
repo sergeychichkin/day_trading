@@ -6,7 +6,6 @@ daily_cache = "../data/spy_daily.json"
 entry1_start_time = "09:30"
 entry1_end_time = "09:40"
 entry_atr_buffer = 0.25
-stop_atr_buffer = 0.25
 entry_order_valid_minutes = 120
 
 [account]

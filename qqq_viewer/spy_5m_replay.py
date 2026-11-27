@@ -19,7 +19,6 @@ class EntrySettings:
     entry1_start_time: time = time(9, 30)
     entry1_end_time: time = time(9, 40)
     entry_atr_buffer: float = 0.25
-    stop_atr_buffer: float = 0.25
     entry_order_valid_minutes: int = 120
 
 
@@ -140,7 +139,7 @@ def _size(trigger: float, stop: float, equity: float | Decimal, account: Account
 
 def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | None],
                upper: float | None, equity: float | Decimal, entry: EntrySettings, account: AccountSettings,
-               exit_mode: ExitMode, *, next_open: tuple[int, float] | None = None,
+               exit_mode: ExitMode, *, session_lower: float | None, next_open: tuple[int, float] | None = None,
                position: OpenPosition | None = None,
                prior_lowers: tuple[float | None, float | None] = (None, None),
                previous_session_date: date | None = None,
@@ -182,9 +181,7 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
         return result(reason="cash_unavailable")
 
     signal = None
-    day_low = math.inf
     for index, (bar, atr) in enumerate(zip(bars, atrs, strict=True)):
-        day_low = min(day_low, bar.low)
         if bar.time < first_signal_time:
             continue
         if signal is None:
@@ -204,9 +201,13 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
             events.append(OrderEvent(activate, "rejected", "ATR(20) not available at the bear close"))
             return result(reason="atr_unavailable")
         trigger = order_price(bar.high + entry.entry_atr_buffer * atr, account.tick_size, up=True)
-        stop = order_price(day_low - entry.stop_atr_buffer * atr, account.tick_size, up=False)
-        if not 0 < stop < trigger:
-            events.append(OrderEvent(activate, "rejected", "Nonpositive stop or stop distance", trigger, stop))
+        if session_lower is None:
+            events.append(OrderEvent(activate, "rejected", "Entry session daily Lower is unavailable", trigger))
+            return result(reason="daily_lower_unavailable")
+        stop = order_price(session_lower, account.tick_size, up=False) if math.isfinite(session_lower) else None
+        if stop is None or not 0 < stop < trigger:
+            events.append(OrderEvent(activate, "rejected", "Daily Lower must round to a positive stop below the trigger",
+                                     trigger, stop))
             return result(reason="invalid_stop")
         shares, budget = _size(trigger, stop, equity, account)
         if not shares:
