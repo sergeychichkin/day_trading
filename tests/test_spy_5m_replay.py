@@ -41,13 +41,14 @@ def test_first_bull_and_first_later_bear_own_the_only_setup(replay):
 
 
 @pytest.mark.parametrize("mode", ["same_day_close", "next_session_open", "trailing_stop"])
-def test_session_lower_sets_initial_stop_and_size(replay, mode):
+@pytest.mark.parametrize("lower", [97.509, 97.509999999999])
+def test_session_lower_sets_initial_stop_and_size(replay, mode, lower):
     for low in (98, 95):
         session, bars = tape({0: (100, 101, low, 100), 4: (103, 105, 100, 104)})
         following, _ = tape(day=date(2025, 11, 28))
         result = replay.replay_day(session, bars, [2] * len(bars), 101, 100000,
                                    replay.EntrySettings(), replay.AccountSettings(), mode,
-                                   session_lower=97.509, next_open=(following.open_utc, 104))
+                                   session_lower=lower, next_open=(following.open_utc, 104))
         trade = result.trade or result.position
         assert (trade.entry_trigger, trade.initial_stop, trade.shares) == (102.5, 97.5, 200)
 

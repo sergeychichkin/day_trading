@@ -204,7 +204,10 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
         if session_lower is None:
             events.append(OrderEvent(activate, "rejected", "Entry session daily Lower is unavailable", trigger))
             return result(reason="daily_lower_unavailable")
-        stop = order_price(session_lower, account.tick_size, up=False) if math.isfinite(session_lower) else None
+        stop = None
+        if math.isfinite(session_lower):
+            tick = Fraction(str(account.tick_size))
+            stop = float((Fraction(str(session_lower)) // tick) * tick)
         if stop is None or not 0 < stop < trigger:
             events.append(OrderEvent(activate, "rejected", "Daily Lower must round to a positive stop below the trigger",
                                      trigger, stop))
