@@ -82,6 +82,13 @@ publishes a JSON snapshot for the SPY chart.
 - `backtest_spy_5m.py` runs Entry 1 offline against the publisher's verified
   SQLite range and the Yahoo/SPY daily snapshot. It checks cache identity and
   published NYSE endpoints, copies SQLite inputs to a private snapshot, and
-  records both input fingerprints. `spy_5m_replay.py` models fills and keeps
-  realized P&L and sizing cash in decimal; `spy_5m_report.py` writes standalone
-  HTML exclusively to a new path.
+  records both input fingerprints and the roles of any verified retained
+  sessions before publication. Exit 3 uses the entry session's daily lower
+  on the next NYSE session and either of the two preceding session lowers on
+  later sessions. It checks the same-date open when verified
+  intraday data is available. The separate viewer checks the close as well.
+  `spy_5m_replay.py` carries one Exit 3 position across sessions, activates a
+  higher stop on the next bar, and keeps realized P&L and sizing cash in
+  decimal. `spy_5m_report.py` writes standalone HTML, replacing the default
+  report after the new report is ready. An explicit output path requires a
+  new file.

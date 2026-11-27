@@ -140,14 +140,37 @@ def test_cli_default_output_and_toml_times(runner, replay_files, monkeypatch, ca
         with pytest.raises(SystemExit) as failure:
             runner.main([*args, flag, "09:40"])
         assert failure.value.code == 2
-    assert runner.main(args) == 0
     output = Path("output/SPY_5m_entry1_2025-11-28_2025-11-28.html")
+    output.parent.mkdir()
+    output.write_text("previous report", encoding="utf-8")
+    assert runner.main(args) == 0
     payload = json.loads(output.read_text(encoding="utf-8")
                          .split('id="report-data" type="application/json">', 1)[1].split("</script>", 1)[0])
     entry = payload["settings"]["entry"]
     assert (entry["entry1_start_time"], entry["entry1_end_time"]) == ("09:35", "09:45")
     assert payload["settings"]["chart"]["high_atr_multiplier"] == 0.75
     assert "1 trades" in capsys.readouterr().out
+
+
+def test_default_output_preserves_existing_report_if_replacement_fails(
+    runner, replay_files, monkeypatch, capsys,
+):
+    _, _, config = replay_files
+    monkeypatch.chdir(config.parent)
+    output = Path("output/SPY_5m_entry1_2025-11-28_2025-11-28.html")
+    output.parent.mkdir()
+    output.write_text("previous report", encoding="utf-8")
+
+    def fail_replace(source, target):
+        assert target == output.resolve()
+        assert source.parent == target.parent
+        raise PermissionError("replacement unavailable")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    assert runner.main(["--config", str(config), "--start", "2025-11-28", "--end", "2025-11-28"]) == 1
+    assert "replacement unavailable" in capsys.readouterr().err
+    assert output.read_text(encoding="utf-8") == "previous report"
+    assert list(output.parent.iterdir()) == [output]
 
 
 @pytest.mark.parametrize("value", ["09:30:00", "09:32:00", "09:30:01"])
@@ -265,6 +288,7 @@ def test_exit3_resolves_exact_prior_sessions_and_warmup_volume(runner, replay_fi
 
 def test_exit3_cutoff_retains_pending_stop_and_ignores_legacy_tail(runner, replay_files):
     store, daily, config = replay_files
+    wednesday = date(2025, 11, 26)
     friday = date(2025, 11, 28)
     session, _ = tape(day=friday)
     with store._connection(write=True) as db:
@@ -274,13 +298,22 @@ def test_exit3_cutoff_retains_pending_stop_and_ignores_legacy_tail(runner, repla
     payload["bars"][1].update(open=101, lower=100.9)
     daily.write_text(json.dumps(payload), encoding="utf-8")
     settings = replace(runner.load_settings(config), trailing_stop=True, same_day_close=False)
-    result = runner.run(settings, friday, friday)
+    entry_case = runner.run(settings, wednesday, wednesday)["scenarios"][1]
+    entry_position = entry_case["open_position"]
+    assert entry_position["stop_adjustments"] == []
+    assert entry_position["pending_stop"] is None
+    assert entry_position["active_stop"] == entry_position["initial_stop"]
+    result = runner.run(settings, wednesday, friday)
     legacy, trailing = result["scenarios"]
     assert result["coverage"]["next_open_tail"] == "2025-12-01"
-    assert legacy["trades"][0]["exit_date"] == "2025-12-01"
+    coverage = result["coverage"]
+    assert coverage["exit_only_bars"] == 78
+    assert coverage["fingerprinted_bars"] == coverage["warmup_bars"] + coverage["signal_bars"] + 78
+    assert legacy["trades"][-1]["exit_date"] == "2025-12-01"
     assert trailing["trades"] == [] and trailing["stats"]["net_pnl"] == 0
     position = trailing["open_position"]
     assert position["active_stop"] < position["pending_stop"]
+    assert position["stop_adjustments"][-1]["prior_session_count"] == 1
     assert position["mark_time"] == session.close_utc
     assert position["unrealized_pnl"] == pytest.approx(
         (100.2 - position["entry_price"]) * position["shares"] - 1,
@@ -296,10 +329,12 @@ def test_exit3_cutoff_retains_pending_stop_and_ignores_legacy_tail(runner, repla
         db.executemany("UPDATE bars SET open=?,high=?,low=?,close=? WHERE time=?", [
             (bar.open, bar.high, bar.low, bar.close, bar.time) for bar in monday_bars[:4]
         ])
-    extended = runner.run(settings, friday, monday)["scenarios"][1]
+    extended_data = runner.run(settings, wednesday, monday)
+    extended = extended_data["scenarios"][1]
     first, second = extended["trades"]
-    assert first["date"] == friday.isoformat() and first["exit_time"] == monday_session.open_utc
+    assert first["date"] == wednesday.isoformat() and first["exit_time"] == monday_session.open_utc
     assert second["date"] == monday.isoformat() and first["exit_time"] < second["entry_time"]
+    assert second["stop_adjustments"] == ()
     assert first["equity_after"] == pytest.approx(100000 + first["pnl"])
     assert second["equity_after"] == pytest.approx(first["equity_after"] + second["pnl"])
     assert extended["stats"]["net_pnl"] == pytest.approx(first["pnl"] + second["pnl"])
@@ -307,6 +342,11 @@ def test_exit3_cutoff_retains_pending_stop_and_ignores_legacy_tail(runner, repla
     assert [point["time"] for point in extended["equity"]] == sorted(
         {point["time"] for point in extended["equity"]}
     )
+    restarted = runner.run(settings, monday, monday)
+    assert restarted["months"]["2025-12"] == extended_data["months"]["2025-12"]
+    restarted_case = restarted["scenarios"][1]
+    assert restarted_case["equity"][0] == {"time": monday_session.open_utc, "value": 100000}
+    assert [trade["date"] for trade in restarted_case["trades"]] == ["2025-12-01"]
 
 
 def test_exit3_checks_verified_prior_retained_before_publication(runner, replay_files):
@@ -328,11 +368,44 @@ def test_exit3_checks_verified_prior_retained_before_publication(runner, replay_
     }
     assert data["coverage"]["cache_start"] == "2025-11-25"
     assert first["bars"][0]["atr"] is None
+    assert data["coverage"]["retained_inputs"] == [{
+        "date": "2025-11-24", "bars": 78, "roles": ["prior_open_check", "volume_sma_seed"],
+        "volume_seed_bars": 19,
+    }]
+    assert data["coverage"]["fingerprinted_bars"] == 78 + data["coverage"]["signal_bars"]
     with store._connection(write=True) as db:
         db.execute("UPDATE bars SET open=96 WHERE time=?", (bars[0].time,))
     revised = runner.run(settings)
     assert revised["months"]["2025-11"][0]["prior_lowers"][0]["lower"] == 99
     assert revised["fingerprints"]["intraday_sha256"] != data["fingerprints"]["intraday_sha256"]
+
+
+@pytest.mark.parametrize(("retained_day", "expected_sma"), [
+    (date(2025, 11, 24), 95.5),
+    (date(2025, 11, 21), None),
+])
+def test_report_seeds_volume_from_retained_session_without_daily_lookup(runner, replay_files, retained_day, expected_sma):
+    store, _, config = replay_files
+    prior, bars = tape(day=retained_day)
+    with store._connection(write=True) as db:
+        db.execute("DELETE FROM metadata WHERE key='verified_contiguous_start'")
+    store.record(prior, "complete", [replace(bar, volume=100) for bar in bars])
+    with store._connection(write=True) as db:
+        db.execute("INSERT INTO metadata VALUES ('verified_contiguous_start', '2025-11-25')")
+    settings = replace(runner.load_settings(config), next_session_open=False)
+    for trailing in (False, True):
+        data = runner.run(replace(settings, trailing_stop=trailing))
+        first = data["months"]["2025-11"][0]["bars"]
+        assert first[0]["volume_sma_20"] == expected_sma
+        assert first[19]["volume_sma_20"] == 10
+        assert first[0]["atr"] is None
+        retained = data["coverage"]["retained_inputs"]
+        if expected_sma is None:
+            assert retained == []
+        else:
+            assert retained == [{
+                "date": retained_day.isoformat(), "bars": 78, "roles": ["volume_sma_seed"], "volume_seed_bars": 19,
+            }]
 
 
 @pytest.mark.parametrize("damage", ["missing", "conflict"])

@@ -122,11 +122,23 @@ function drawEvents(month, lastMonth) {
         addRow(body, ["No order events in this chart window"]).cells[0].colSpan = 7;
     } else {
         for (const event of events) {
+            const adjustment = event.adjustment;
+            const chartTime = adjustment?.candle_time ?? event.time;
+            let detail = event.detail;
+            if (adjustment) {
+                detail += ` · Triggering candle ${timestamp(chartTime)} · Effective ${timestamp(adjustment.effective_time)}`;
+                const lookups = scopedBars.get(chartTime)?.session.prior_lowers ?? [];
+                const levels = lookups.slice(0, adjustment.prior_session_count);
+                if (levels.length) {
+                    detail += " · Prior daily lowers " + levels.map(level =>
+                        `${level.date} ${level.lower ?? "—"} (${level.status.replaceAll("_", " ")})`).join(" / ");
+                }
+            }
             const row = addRow(body, [
-                timestamp(event.time), event.action, event.detail, price(event.trigger), price(event.stop), event.shares ?? "—",
+                timestamp(event.time), event.action, detail, price(event.trigger), price(event.stop), event.shares ?? "—",
             ]);
             row.insertCell().append(button("Show event", () => {
-                jump(event.date, event.time, `Order event · ${timestamp(event.time)} · ${event.detail}`);
+                jump(event.date, chartTime, `Order event · ${timestamp(event.time)} · ${detail}`);
             }));
         }
     }
@@ -226,7 +238,7 @@ function drawMonth(month, focusDay, focusTime) {
         for (const adjustment of trade.stop_adjustments) {
             if (scopedBars.has(adjustment.candle_time)) {
                 markers.push({time: adjustment.candle_time, position: "belowBar", shape: "circle",
-                    color: colors.down, text: `Stop raised to ${price(adjustment.new_stop)}`});
+                    color: colors.down, text: `Next stop ${price(adjustment.new_stop)}`});
             }
         }
         if (starts.has(trade.exit_date)) {
@@ -308,7 +320,7 @@ function drawScenario() {
     get("net-pnl").textContent = money(stats.net_pnl);
     get("trade-count").textContent = count.format(stats.trades);
     get("max-drawdown").textContent = pct(stats.max_drawdown_pct);
-    get("selected-equity").textContent = active.label;
+    get("selected-equity").textContent = `${active.label} closed balance`;
     [...get("scenarios").tBodies[0].rows].forEach((row, i) =>
         row.classList.toggle("active-scenario", data.scenarios[i] === active));
     equityLine.setData(active.equity);
@@ -345,15 +357,19 @@ get("parameters").textContent = `${c.start} through ${c.end} · Bull signal wind
     + ` · One setup per day · ${money(account.starting_balance)} start · ${account.risk_pct}% planned risk`;
 get("coverage").textContent = `${count.format(c.signal_sessions)} signal sessions · ${count.format(c.signal_bars)} signal bars`
     + ` · ${count.format(c.warmup_bars)} ATR warmup bars · Published cache ${c.cache_start} through ${c.cache_end}`
-    + (c.next_open_tail ? ` · ${c.next_open_tail} included only for a next-open exit` : "")
+    + ` · ${count.format(c.fingerprinted_bars)} fingerprinted bars`
+    + (c.retained_inputs.length ? " · See input coverage for retained sessions" : "")
+    + (c.next_open_tail ? ` · ${c.next_open_tail} included only for a next-open exit (${count.format(c.exit_only_bars)} bars)` : "")
     + (c.next_open_tail_unavailable ? ` · Next open unavailable: ${c.next_open_tail_unavailable}` : "");
 get("execution").textContent = `ATR(20) carries across regular sessions; trigger/stop buffers ${entry.entry_atr_buffer}/${entry.stop_atr_buffer}. `
     + `Order activates on the following bar for up to ${entry.entry_order_valid_minutes} minutes. Slippage is at least `
     + `$${data.settings.account_exact?.slippage_floor ?? account.slippage_floor} or ${account.slippage_bps} bp per fill. `
     + "Ambiguous five-minute paths assume entry then stop. "
     + "Gaps, costs and slippage can raise losses above the sizing budget."
-    + (data.settings.trailing_stop ? " Exit 3 carries one position across regular sessions and can raise its stop from the next bar." : "");
-get("provenance").textContent = JSON.stringify({settings: data.settings, fingerprints: data.fingerprints}, null, 2);
+    + (data.settings.trailing_stop ? " Exit 3 keeps the original stop on the entry session. A stop raise uses the entry session’s daily lower"
+        + " on the first following NYSE session and either of the two preceding daily lowers on later sessions."
+        + " A higher stop applies from the next bar." : "");
+get("provenance").textContent = JSON.stringify({settings: data.settings, fingerprints: data.fingerprints, coverage: c}, null, 2);
 benchmark.setData(data.benchmark);
 get("scenario").addEventListener("change", drawScenario);
 get("month").addEventListener("change", () => drawMonth(get("month").value));

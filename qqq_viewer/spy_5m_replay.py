@@ -2,8 +2,9 @@
 
 import math
 from dataclasses import dataclass, replace
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from fractions import Fraction
 from typing import Literal
 
 from .opening_range import commission, order_price
@@ -33,6 +34,15 @@ class AccountSettings:
 
 
 @dataclass(frozen=True)
+class StopAdjustment:
+    candle_time: int
+    effective_time: int
+    old_stop: float
+    new_stop: float
+    prior_session_count: int
+
+
+@dataclass(frozen=True)
 class OrderEvent:
     time: int
     action: str
@@ -40,14 +50,7 @@ class OrderEvent:
     trigger: float | None = None
     stop: float | None = None
     shares: int | None = None
-
-
-@dataclass(frozen=True)
-class StopAdjustment:
-    candle_time: int
-    effective_time: int
-    old_stop: float
-    new_stop: float
+    adjustment: StopAdjustment | None = None
 
 
 @dataclass
@@ -140,6 +143,7 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
                exit_mode: ExitMode, *, next_open: tuple[int, float] | None = None,
                position: OpenPosition | None = None,
                prior_lowers: tuple[float | None, float | None] = (None, None),
+               previous_session_date: date | None = None,
                next_bar_open: int | None = None) -> DayResult:
     events: list[OrderEvent] = []
     if exit_mode not in {"same_day_close", "next_session_open", "trailing_stop"}:
@@ -151,13 +155,18 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
     if position is not None and exit_mode != "trailing_stop":
         raise ValueError("Only Exit 3 carries an open position.")
 
-    level = max((value for value in prior_lowers if value is not None), default=None)
     carried_trade = None
     first_signal_time = session.open_utc
     if position is not None:
         position = replace(position)
+        if previous_session_date is None:
+            prior_sessions = sessions(session.date - timedelta(days=14), session.date - timedelta(days=1))
+            previous_session_date = prior_sessions[-1].date if prior_sessions else None
+        entry_date = datetime.fromtimestamp(position.entry_time, NEW_YORK).date()
+        prior_session_count = 1 if entry_date == previous_session_date else 2
+        level = max((value for value in prior_lowers[:prior_session_count] if value is not None), default=None)
         carried_trade = _advance(position, session, bars, atrs, 0, account, exit_mode,
-                                 next_open, next_bar_open, level, events)
+                                 next_open, next_bar_open, level, prior_session_count, events)
         if carried_trade is None:
             return DayResult(None, events, position=position)
         first_signal_time = carried_trade.exit_time
@@ -225,7 +234,7 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
                                     entry_price, reference, stop, entry_price, entry_price)
             position.observe(reference)
             trade = _advance(position, session, bars, atrs, offset, account, exit_mode,
-                             next_open, next_bar_open, level, events)
+                             next_open, next_bar_open, None, 0, events)
             return result(trade, open_position=position if trade is None else None)
         events.append(OrderEvent(expiry, "expired", "Buy stop expired without a fill", trigger, stop, shares))
         return result(reason="expired")
@@ -233,7 +242,7 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
 
 
 def _advance(position, session, bars, atrs, offset, account, exit_mode, next_open,
-             next_bar_open, level, events) -> Trade | None:
+             next_bar_open, level, prior_session_count, events) -> Trade | None:
     for index in range(offset, len(bars)):
         bar = bars[index]
         if position.pending_stop is not None:
@@ -252,7 +261,9 @@ def _advance(position, session, bars, atrs, offset, account, exit_mode, next_ope
         atr = atrs[index]
         if (exit_mode == "trailing_stop" and level is not None and bar.close > bar.open
                 and bar.high < level and atr is not None and math.isfinite(atr) and atr >= 0):
-            candidate = order_price(bar.low - 0.5 * atr, account.tick_size, up=False)
+            tick = Fraction(str(account.tick_size))
+            raw_stop = Fraction(str(bar.low)) - Fraction(str(atr)) / 2
+            candidate = float((raw_stop // tick) * tick)
             if candidate > stop:
                 effective = bars[index + 1].time if index + 1 < len(bars) else next_bar_open
                 if effective is None:
@@ -260,10 +271,11 @@ def _advance(position, session, bars, atrs, offset, account, exit_mode, next_ope
                     following = sessions(day + timedelta(days=1), day + timedelta(days=14))
                     effective = following[0].open_utc
                 position.pending_stop = candidate
-                position.stop_adjustments += (StopAdjustment(bar.time, effective, stop, candidate),)
+                adjustment = StopAdjustment(bar.time, effective, stop, candidate, prior_session_count)
+                position.stop_adjustments += (adjustment,)
                 events.append(OrderEvent(bar.time + STEP, "stop_adjusted",
-                                         f"Raised protective stop from {stop:g} to {candidate:g}",
-                                         position.entry_trigger, candidate, position.shares))
+                                         f"Protective stop increase from {stop} to {candidate}",
+                                         position.entry_trigger, candidate, position.shares, adjustment))
     if exit_mode == "trailing_stop":
         return None
     if exit_mode == "same_day_close":

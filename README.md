@@ -131,12 +131,16 @@ Open [the separate five-minute viewer](http://127.0.0.1:8765/spy/5m). The picker
 
 ## SPY five-minute Entry 1 backtest
 
-Run the replay from the repository root with the verified intraday cache and SPY daily levels already installed. It reads both locally; TWS does not need to be open. The default backtest uses the full published range and creates a separate standalone HTML report under `output/`.
+Run the replay from the repository root with the verified intraday cache and SPY daily levels already installed. It reads both locally; TWS does not need to be open. The default backtest uses the full published range. A successful run without `--output` replaces the date-named default report under `output/`. Pass `--output` with an unused HTML filename to keep a separate report.
 
 ```powershell
 .\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml
 .\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml --start 2020-01-01 --end 2020-12-31 --output output/SPY_5m_2020_exit3.html
 ```
+
+A run starts flat with the configured cash at its first signal session.
+The earlier history supplies indicator warmup and prior daily levels.
+Moving `--start` into an existing trade's dates starts a fresh replay.
 
 [`config/SPY.toml`](config/SPY.toml) controls the entry window, the two ATR buffers, the order lifetime, equity and risk, and execution costs. Signal times label five-minute candle **starts**, in New York time. Only the first qualifying bull close can arm a setup; the first later bear can occur after the signal window. At the bear close the runner fixes the buy trigger and protective stop from the information available then, including the low so far, before allowing a fill on the next bar. The order cannot survive its expiry or the regular-session close.
 
@@ -145,10 +149,19 @@ quoted times such as `"09:30"` or local time literals such as `09:30:00` on
 the same five-minute grid.
 
 Exit 3 is enabled by default. One position can stay open across regular sessions
-until its protective stop is hit. If a bull candle's high is below either of the
-two preceding sessions' daily lower levels, the stop can rise to the candle low
-minus half its ATR(20), rounded down to a tick and effective from the next bar.
-The report shows any position still open at the replay cutoff.
+until its protective stop is hit. The entry session uses the original stop.
+On the first following NYSE session, a stop raise can use only the entry
+session's daily lower. On later sessions, either of the two immediately
+preceding sessions' valid daily lowers can qualify. If a bull candle's high is
+strictly below an eligible lower, the stop can rise to the candle low minus half
+its ATR(20), floored to a tick and effective from the next bar. The report shows
+any position still open at the replay cutoff.
+The prior levels are the stored Yahoo daily snapshot's `lower` prices.
+The backtester compares the daily and verified five-minute opens for that
+date when both are available, allowing up to a 5% difference. The separate
+five-minute viewer also checks the close and can suppress a level the
+backtester uses. Adjustment events show the eligible prior lookup results and the
+triggering and effective candle times in New York.
 
 To run the legacy exits, copy the TOML alongside the original and enable
 `same_day_close` or `next_session_open` in `[exits]`. Set `trailing_stop = false`
@@ -161,12 +174,16 @@ The immediate next NYSE session may be used for an exit even beyond the
 published signal range, but only if its cached bars independently pass
 verification. It cannot generate entries and is hidden in the same-day view.
 
-The backtest uses whole shares, 1% planned risk and a cash cap by default. It charges modeled IBKR Pro Fixed commissions and configurable adverse slippage. Gap moves and five-minute path ambiguity are modeled separately; planned risk is not a guaranteed maximum loss. The report includes scenario results, equity and drawdown, a price-only buy-and-hold benchmark, session charts, and order and trade logs.
+The backtest uses whole shares, 1% planned risk and a cash cap by default. It charges modeled IBKR Pro Fixed commissions and configurable adverse slippage. Gap moves and five-minute path ambiguity are modeled separately. The report shows realized P&L, closed-balance return and drawdown, any open position's unrealized P&L, and a price-only buy-and-hold benchmark. Strategy and benchmark returns exclude dividends. The replay uses stored prices and models no corporate-action adjustments to positions or orders.
 
 The month picker loads the selected month and the next calendar month when
 the report contains both. Scroll across their boundary in the same chart.
 Volume and its 20-bar simple moving average share an overlay scale in the
-price pane. The High and Low ATR checkboxes start off. Set their multipliers
+price pane. A verified session immediately before publication can supply the
+19 preceding SMA bars. ATR starts warming up at publication. The report's
+input coverage lists any retained sessions hashed for the SMA or prior-open
+checks, their bar counts and roles, and the total number of fingerprinted
+bars. The High and Low ATR checkboxes start off. Set their multipliers
 under `[chart]` to change the guides without affecting the strategy.
 Trade and order-event buttons bring the selected session into view. The chart
 marks protective stops and their adjustments, same-day closes, next opens,
@@ -207,10 +224,9 @@ $legacy.Replace("next_session_open = false", "next_session_open = true") | Set-C
 ```
 
 Expected archived-input coverage: **3,249 signal sessions and 252,450 bars**;
-**71 trades** in each exit scenario. Under **Settings and input fingerprints**,
-compare these SHA-256 values. The intraday hash covers all consumed bars:
-ATR warmup, signal sessions, and any verified exit-only session. It does not
-hash the SQLite file bytes:
+**71 trades** in each exit scenario. Under **Settings, input fingerprints and
+coverage**, compare the SHA-256 values below. The archived intraday hash
+covers the replay's canonical bar records. Input coverage lists its counts.
 
 - Intraday: `37d8a0626c5d9d1ea470bb358dde7713dad60f6828c0dcfa9c864682cc18cc29`
 - Daily: `b955d740c3111250be921f84ecbffd72c37fe2fda8c8c255496a9a27918e9577`

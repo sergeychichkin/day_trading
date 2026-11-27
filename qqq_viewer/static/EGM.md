@@ -55,7 +55,15 @@ counter prevents older month responses from changing the view.
 ## SPY five-minute Entry 1 report
 
 `spy-5m-report.html` and `spy-5m-report.js` render the offline replay payload
-with embedded chart assets. Trade and order-event controls focus the price
-chart on the selected session. Exit and ambiguity markers distinguish chart
-events; the gap-cost column excludes overnight movement that does not pass
-the trigger or stop.
+with embedded chart assets. The selected month and its next calendar month
+share one viewport. Volume and its 20-bar SMA use a separate scale in the
+price pane, and the ATR overlays are optional.
+
+Exit 3 adjustments show the triggering and effective times, eligible prior daily
+lower prices and lookup statuses. The event jump selects the triggering
+candle. The backtest validates the daily snapshot levels using the open,
+while the separate viewer also checks the close. Active stop segments show
+which price applies in each session. The summary uses closed balances and
+shows any terminal open position separately. Its gap-cost column measures
+opening overshoot at the entry trigger or protective stop. Input coverage
+lists the dates and roles of any retained history included in the fingerprint.

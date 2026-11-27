@@ -1,10 +1,11 @@
-"""Write a standalone SPY replay report without touching existing outputs."""
+"""Write a standalone SPY replay report."""
 
 import html
 import json
 import os
 import re
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 STATIC = Path(__file__).with_name("static")
 TOKENS = re.compile(r"\{\{(TITLE|CSS|PAYLOAD|LIBRARY|SCRIPT)\}\}")
@@ -19,7 +20,7 @@ def _validate_windows_output_name(path) -> None:
         raise ValueError("The report path contains a reserved or invalid Windows name.")
 
 
-def write_report(path: Path, data: dict) -> None:
+def write_report(path: Path, data: dict, *, replace_existing: bool = False) -> None:
     if os.name == "nt":
         _validate_windows_output_name(path)
     values = {
@@ -30,6 +31,18 @@ def write_report(path: Path, data: dict) -> None:
         "PAYLOAD": json.dumps(data, allow_nan=False, separators=(",", ":")).replace("<", "\\u003c"),
     }
     template = (STATIC / "spy-5m-report.html").read_text(encoding="utf-8-sig")
+    report = TOKENS.sub(lambda match: values[match[1]], template)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8") as file:
-        file.write(TOKENS.sub(lambda match: values[match[1]], template))
+    if not replace_existing:
+        with path.open("x", encoding="utf-8") as file:
+            file.write(report)
+        return
+
+    file = NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False)
+    temporary = Path(file.name)
+    try:
+        with file:
+            file.write(report)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)

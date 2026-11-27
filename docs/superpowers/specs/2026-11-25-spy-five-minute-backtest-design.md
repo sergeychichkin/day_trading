@@ -1,5 +1,8 @@
 # SPY five-minute Entry 1 backtest
 
+This is the original two-exit design. The [Exit 3 design](2026-11-26-spy-five-minute-exit-3-design.md)
+describes the current defaults, entry-window configuration and report behavior.
+
 ## Purpose
 
 Compare SPY entry time windows and the effect of exiting at the entry day's close versus the next session's open. Replay historical bars only; do not place orders or change the SPY chart, acquisition caches, QQQ strategy, or existing reports.

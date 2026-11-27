@@ -22,21 +22,21 @@
     <div class="toolbar"><h2 id="summary-heading">Executive Performance Summary</h2>
         <label>Exit scenario <select id="scenario"></select></label></div>
     <div id="summary">
-        <div class="card">Ending equity<strong id="ending-equity"></strong></div>
-        <div class="card">Net P&amp;L<strong id="net-pnl"></strong></div>
-        <div class="card">Trades<strong id="trade-count"></strong></div>
-        <div class="card">Max drawdown<strong id="max-drawdown"></strong></div>
+        <div class="card">Ending closed balance<strong id="ending-equity"></strong></div>
+        <div class="card">Realized net P&amp;L<strong id="net-pnl"></strong></div>
+        <div class="card">Closed trades<strong id="trade-count"></strong></div>
+        <div class="card">Max closed-balance drawdown<strong id="max-drawdown"></strong></div>
     </div>
     <div class="scroll"><table id="scenarios">
-        <thead><tr><th>Scenario</th><th>Trades</th><th>Net P&amp;L</th><th>Return</th><th>Max drawdown</th>
-            <th>Win rate</th><th>Profit factor</th><th>Commission</th><th>Slippage</th><th>Adverse gap vs. trigger/stop</th><th>Ambiguous</th></tr></thead>
+        <thead><tr><th>Scenario</th><th>Closed trades</th><th>Realized net P&amp;L</th><th>Closed-balance return</th><th>Max closed-balance drawdown</th>
+            <th>Win rate</th><th>Profit factor</th><th>Closed-trade commission</th><th>Closed-trade slippage</th><th>Adverse gap vs. trigger/stop</th><th>Ambiguous</th></tr></thead>
         <tbody></tbody>
     </table></div>
     <p class="muted">Profit factor divides total net gains by absolute total net losses. ∞ means gains without losses; — means no nonzero trades.</p>
     <div id="open-position" hidden></div>
 </section>
 <section aria-labelledby="equity-heading">
-    <h2 id="equity-heading">Equity and Drawdown</h2>
+    <h2 id="equity-heading">Closed Balance and Drawdown</h2>
     <p class="key"><span class="base" id="selected-equity"></span><span class="benchmark">Buy and hold, price only</span></p>
     <div id="equity"></div><p class="muted">Closed-balance drawdown</p><div id="drawdown"></div>
 </section>
@@ -72,12 +72,15 @@
 <section aria-labelledby="details-heading">
     <h2 id="details-heading">Run Details</h2>
     <p id="coverage"></p><p id="skips"></p><p id="execution"></p>
+    <p>Each replay starts flat with configured cash. Earlier sessions supply indicator warmup and prior daily levels.
+       Strategy returns and the benchmark exclude dividends. The replay uses stored prices and models no corporate-action
+       adjustments to positions or orders.</p>
     <p>IBKR Pro Fixed uses $0.005 per share per executed order, a $1 minimum and a 1% trade-value cap.
        Venue and regulatory fees are excluded. Net P&amp;L already reflects opening gaps, adverse slippage and commissions;
         the cost columns are not additional deductions. “Adverse gap vs. trigger/stop” measures entry overshoot
         above the trigger and exit shortfall below the protective stop at an opening print. Other overnight
-        movement is included in P&amp;L, but not in this column. The benchmark excludes trading costs and dividends.</p>
-    <details><summary>Settings and input fingerprints</summary><pre id="provenance"></pre></details>
+        price movement is included in P&amp;L. The benchmark excludes trading costs.</p>
+    <details><summary>Settings, input fingerprints and coverage</summary><pre id="provenance"></pre></details>
 </section>
 <footer><a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">Charts by TradingView</a></footer>
 </main>

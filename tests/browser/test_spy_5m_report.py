@@ -20,6 +20,7 @@ def capture_price(page):
                         window.spyPriceChart = chart;
                         window.spyPriceLines = [];
                         window.spyPriceLineOptions = [];
+                        window.spyNamedSeries = {};
                         const makeCandle = chart.addCandlestickSeries.bind(chart);
                         const makeLine = chart.addLineSeries.bind(chart);
                         const makeVolume = chart.addHistogramSeries.bind(chart);
@@ -48,6 +49,7 @@ def capture_price(page):
                         };
                         chart.addLineSeries = opts => {
                             const series = makeLine(opts);
+                            if (opts.title) window.spyNamedSeries[opts.title] = series;
                             const setData = series.setData.bind(series);
                             series.setData = points => {
                                 window.spyPriceLines.push(points);
@@ -197,6 +199,9 @@ def test_report_two_months_and_independent_overlays(page, replay_files, tmp_path
     low = page.get_by_role("checkbox", name="Low − 1.25 ATR", exact=True)
     expect(high).not_to_be_checked()
     expect(low).not_to_be_checked()
+    titles = ["High + 0.75 ATR", "Low − 1.25 ATR"]
+    visibility = "titles => titles.map(title => spyNamedSeries[title].options().visible)"
+    assert page.evaluate(visibility, titles) == [False, False]
     assert page.evaluate("spyVolume.points.length") == page.evaluate("spyCandles.length")
     assert page.evaluate("""() => spyPriceLineOptions.some(o => o.priceScaleId === spyVolume.scale
         && o.title === 'Volume SMA(20)')""")
@@ -205,6 +210,7 @@ def test_report_two_months_and_independent_overlays(page, replay_files, tmp_path
                          december[0]["open_utc"]) == 11.5
     high.check()
     expect(low).not_to_be_checked()
+    assert page.evaluate(visibility, titles) == [True, False]
     active_bar = november[0]["bars"][19]
     assert page.evaluate("""() => spyPriceLines[spyPriceLineOptions.findLastIndex(
         o => o.title === 'High + 0.75 ATR')][0]""") == {
@@ -213,8 +219,23 @@ def test_report_two_months_and_independent_overlays(page, replay_files, tmp_path
     low.check()
     high.uncheck()
     expect(low).to_be_checked()
+    assert page.evaluate(visibility, titles) == [False, True]
     assert page.evaluate("""() => spyPriceLines[spyPriceLineOptions.findLastIndex(
         o => o.title === 'Low − 1.25 ATR')][0].value""") == active_bar["low"] - 1.25 * active_bar["atr"]
+    boundary = page.evaluate("time => spyCandles.findIndex(bar => bar.time === time)", december[0]["open_utc"])
+    chart = page.locator("#price")
+    chart.scroll_into_view_if_needed()
+    page.evaluate("index => spyPriceChart.timeScale().setVisibleLogicalRange({from: index - 60, to: index - 1})",
+                  boundary)
+    page.wait_for_function("index => spyPriceChart.timeScale().getVisibleLogicalRange().to < index", arg=boundary)
+    box = chart.bounding_box()
+    x, y = box["x"], box["y"] + box["height"] / 3
+    page.mouse.move(x + 0.75 * box["width"], y)
+    page.mouse.down()
+    page.mouse.move(x + 0.25 * box["width"], y, steps=10)
+    page.mouse.up()
+    page.wait_for_function("index => spyPriceChart.timeScale().getVisibleLogicalRange().to > index", arg=boundary)
+    expect(picker).to_have_value("2025-11")
     picker.select_option("2025-12")
     assert page.evaluate("spyCandles[0].time") == december[0]["open_utc"]
     assert page.evaluate("""() => spyPriceLines[spyPriceLineOptions.findLastIndex(
@@ -263,6 +284,8 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     store, daily, config = replay_files
     friday, monday = sessions(date(2025, 11, 28), date(2025, 12, 1))
     with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=99,high=100.7,low=98.8,close=100.1 WHERE time=?",
+                   (friday.close_utc - 600,))
         db.execute("UPDATE bars SET open=99,high=100.8,low=99,close=100.2 WHERE time=?",
                    (friday.close_utc - 300,))
         db.execute("UPDATE bars SET open=97,high=105,low=96,close=104 WHERE time=?", (monday.open_utc,))
@@ -270,7 +293,7 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     daily_data["bars"][1].update(open=101, lower=100.9)
     daily.write_text(json.dumps(daily_data), encoding="utf-8")
     settings = replace(load_settings(config), trailing_stop=True, same_day_close=False, next_session_open=False)
-    payload = run(settings, friday.date, monday.date)
+    payload = run(settings, date(2025, 11, 26), monday.date)
     scenario, = payload["scenarios"]
     trade, = scenario["trades"]
     output = tmp_path / "exit3.html"
@@ -282,17 +305,33 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     assert {"MFE (R)", "MAE (R)"}.issubset(headings)
     assert not {"Trigger", "Adverse gap vs. trigger/stop", "Ambiguous"}.intersection(headings)
     cells = page.locator("#trades tbody td").all_text_contents()
+    assert cells[0] == "2025-11-26"
     assert cells[1:4] == ["09:40", "09:45", "09:50"]
     assert "Dec 1, 2025" in cells[6]
     assert cells[10:12] == [f"{trade['mfe_r']:.2f}", f"{trade['mae_r']:.2f}"]
     expect(page.locator("#event-month")).to_contain_text("2025-11 through 2025-12")
-    expect(page.locator("#orders tbody")).to_contain_text("Raised protective stop")
+    rows = page.locator("#orders tbody tr").filter(has_text="Protective stop increase")
+    expect(rows).to_have_count(2)
+    for row, trigger, effective in (
+        (rows.nth(0), "12:50", "Nov 28, 2025, 12:55"),
+        (rows.nth(1), "12:55", "Dec 1, 2025, 09:30"),
+    ):
+        expect(row).to_contain_text(f"Triggering candle Nov 28, 2025, {trigger}")
+        expect(row).to_contain_text(f"Effective {effective}")
+        expect(row).to_contain_text("2025-11-26 100.9 (verified)")
+        expect(row).not_to_contain_text("2025-11-25")
+        row.get_by_role("button", name="Show event").click()
+        expect(page.locator("#chart-legend")).to_contain_text(f"Nov 28, 2025, {trigger}")
     page.get_by_role("button", name="Show exit").click()
     expect(page.locator("#month")).to_have_value("2025-11")
     points = [{"time": monday.open_utc, "value": trade["stop_adjustments"][-1]["new_stop"]}]
     assert points in page.evaluate("spyPriceLines")
     expect(page.locator("#open-position")).to_contain_text("Unrealized P&L")
     expect(page.locator("#open-position")).to_contain_text(scenario["open_position"]["entry_date"])
+    expect(page.locator("#summary")).to_contain_text("Ending closed balance")
+    expect(page.locator("#summary")).to_contain_text("Realized net P&L")
+    expect(page.locator("#summary")).to_contain_text("Max closed-balance drawdown")
+    expect(page.locator("#provenance")).to_contain_text('"fingerprinted_bars"')
 
 
 def test_report_labels_skips_as_new_entry_outcomes(page, replay_files, tmp_path):

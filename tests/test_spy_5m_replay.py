@@ -130,15 +130,50 @@ def trail(replay, overrides, *, day=date(2025, 11, 28), atr=1.01, lowers=(105, 1
     )
 
 
+def entered_wednesday(replay):
+    return trail(replay, {4: (103, 105, 99, 103)}, day=date(2025, 11, 26)).position
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+def test_entry_session_uses_only_original_stop(replay, stopped):
+    result = trail(replay, {
+        4: (103, 105, 99, 103), 5: (104, 106, 104, 105),
+        6: (104, 105, 98 if stopped else 103, 104),
+    })
+    if stopped:
+        trade, = result.completed_trades
+        assert trade.exit_price == 98 and not trade.stop_adjustments
+    else:
+        assert result.completed_trades == ()
+        assert result.position.active_stop == 98
+        assert result.position.stop_adjustments == ()
+
+
+@pytest.mark.parametrize("recent", [105, None])
+def test_first_following_session_ignores_older_lower(replay, recent):
+    friday = trail(replay, {0: (104, 106, 104, 105), 2: (100, 101, 99, 100)}, position=entered_wednesday(replay),
+                   lowers=(recent, 107))
+    assert friday.position.active_stop == 98
+    assert friday.position.stop_adjustments == ()
+    monday = trail(replay, {0: (104, 106, 104, 105), 1: (104, 105, 103.49, 104)},
+                   day=date(2025, 12, 1), position=friday.position, lowers=(recent, 107))
+    trade, = monday.completed_trades
+    adjustment, = trade.stop_adjustments
+    assert trade.exit_price == 103.49
+    assert adjustment.prior_session_count == 2
+
+
 def test_trailing_stop_starts_next_bar_and_only_rises(replay):
     result = trail(replay, {
+        0: (100, 101, 99, 100),
+        2: (100, 101, 99, 100),
         4: (103, 105, 99, 103),
         5: (104, 106, 104, 105),
         6: (104, 107, 104, 106),  # Equal to the higher level.
         7: (105, 106, 105, 105),  # Doji.
         8: (104.1, 105, 103.6, 104.5),  # Lower candidate.
         9: (104, 105, 103, 104),
-    })
+    }, day=date(2025, 12, 1), position=entered_wednesday(replay))
     trade, = result.completed_trades
     adjustment, = trade.stop_adjustments
     assert adjustment.effective_time == adjustment.candle_time + 300
@@ -147,22 +182,43 @@ def test_trailing_stop_starts_next_bar_and_only_rises(replay):
     assert trade.exit_time == adjustment.candle_time + 4 * 300
 
 
+@pytest.mark.parametrize(("atr", "next_low", "expected_stop", "closes"), [
+    (1.02, 103.49, 103.49, True),
+    (1.020000000002, 103.49, 103.48, False),
+    (1e-30, 104, 103.99, False),
+])
+def test_trailing_stop_floors_at_tick_boundary(replay, atr, next_low, expected_stop, closes):
+    overrides = {index: (104, 105, 104, 104) for index in range(7, 42)}
+    overrides.update({0: (100, 101, 99, 100), 4: (103, 105, 99, 103),
+                      5: (104, 106, 104, 105), 6: (104, 105, next_low, 104)})
+    result = trail(replay, overrides, atr=atr, lowers=(107, 105), position=entered_wednesday(replay))
+    if closes:
+        trade, = result.completed_trades
+        assert trade.exit_price == expected_stop
+    else:
+        assert result.completed_trades == ()
+        assert result.position.active_stop == expected_stop
+
+
 def test_closing_bar_adjustment_survives_weekend(replay):
     monday = date(2025, 12, 1)
     session, _ = tape(day=monday)
-    friday = trail(replay, {4: (103, 105, 99, 103), 41: (104, 106, 104, 105)},
-                   next_bar_open=session.open_utc)
+    friday = trail(replay, {0: (100, 101, 99, 100), 2: (100, 101, 99, 100), 41: (104, 106, 104, 105)},
+                   next_bar_open=session.open_utc, position=entered_wednesday(replay), lowers=(107, 105))
     assert friday.position.active_stop == 98
     assert friday.position.pending_stop == 103.49
+    assert friday.position.stop_adjustments[-1].prior_session_count == 1
     assert friday.completed_trades == ()
     result = trail(replay, {0: (97, 105, 96, 104), 1: (104, 105, 99, 101),
-                            2: (106, 108, 100, 107), 3: (107, 108, 95, 106)},
-                   day=monday, position=friday.position)
+                            2: (106, 108, 100, 107), 3: (107, 109, 105, 108),
+                            4: (107, 108, 95, 106)},
+                   day=monday, position=friday.position, lowers=(110, 111))
     first, second = result.completed_trades
     assert first.exit_time == session.open_utc and first.exit_price == 97
     assert first.gap_slippage == pytest.approx((103 - 102 + 103.49 - 97) * first.shares)
     assert first.mae_r == pytest.approx(6 / 5)
     assert second.signal_time == session.open_utc
+    assert second.exit_price == 96 and second.stop_adjustments == ()
     assert result.position is None
     assert sum(event.action == "submitted" for event in result.events) == 1
     carried = trail(replay, {0: (100, 101, 99, 100)}, lowers=(None, None), day=monday, position=replace(

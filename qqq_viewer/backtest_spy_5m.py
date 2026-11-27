@@ -316,6 +316,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     atr = WilderATR(20)
     volumes = deque(maxlen=20)
     prior_levels = deque(maxlen=2)
+    retained_inputs = []
     position = None
     benchmark_open = None
     warmup_bars = signal_bars = 0
@@ -343,20 +344,31 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
         days = [session for session in calendar if session.date <= signal_days[-1].date]
         signal_end = signal_days[-1].date
         candidate = None
-        if settings.trailing_stop:
-            before_cache = sessions(first - timedelta(days=14), first - timedelta(days=1))
-            for session in before_cache[-2:]:
-                day = session.date.isoformat()
-                row = daily.get(day, {})
-                level = _prior_lower(day, row, None)
-                if level["lower"] is not None:
-                    try:
-                        prior_bars = _verified_bars(db, session)
-                    except ValueError:
-                        pass  # No verified five-minute open for this pre-publication session.
-                    else:
-                        _fingerprint_bars(digest, prior_bars)
+        before_cache = sessions(first - timedelta(days=14), first - timedelta(days=1))[-2:]
+        for session in before_cache:
+            day = session.date.isoformat()
+            row = daily.get(day, {})
+            level = _prior_lower(day, row, None)
+            check_open = settings.trailing_stop and level["lower"] is not None
+            seed_volume = session == before_cache[-1]
+            if check_open or seed_volume:
+                try:
+                    prior_bars = _verified_bars(db, session)
+                except ValueError:
+                    pass  # Only independently verified retained bars can seed the chart or validate an open.
+                else:
+                    roles = []
+                    if check_open:
                         level = _prior_lower(day, row, prior_bars[0].open)
+                        roles.append("prior_open_check")
+                    seed = prior_bars[-(volumes.maxlen - 1):] if seed_volume else []
+                    if seed:
+                        volumes.extend(bar.volume for bar in seed)
+                        roles.append("volume_sma_seed")
+                    _fingerprint_bars(digest, prior_bars)
+                    retained_inputs.append({"date": day, "bars": len(prior_bars), "roles": roles,
+                                            "volume_seed_bars": len(seed)})
+            if settings.trailing_stop:
                 prior_levels.appendleft(level)
         if settings.trailing_stop or settings.next_session_open:
             candidate = next(iter(sessions(signal_end + timedelta(days=1), signal_end + timedelta(days=14))), None)
@@ -412,6 +424,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                     _point(benchmark, session.open_utc, initial)
                 _point(benchmark, session.close_utc, initial * bars[-1].close / benchmark_open)
                 next_open = (following.open_utc, next_bars[0].open) if following else None
+                previous_session_date = date.fromisoformat(priors[0]["date"]) if priors else None
                 for case in cases:
                     mode = case["id"]
                     equity = balances[mode]
@@ -423,6 +436,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                         session, bars, atrs, upper, equity, settings.entry, settings.account, mode,
                         next_open=next_open, position=position if trailing else None,
                         prior_lowers=tuple(item["lower"] for item in priors) if trailing else (None, None),
+                        previous_session_date=previous_session_date if trailing else None,
                         next_bar_open=upcoming.open_utc if trailing and upcoming else None,
                     )
                     if trailing:
@@ -434,7 +448,11 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                         reason = level_status
                     if reason:
                         case["skips"][reason] += 1
-                    case["events"].extend({**asdict(event), "date": _ny_date(event.time)} for event in result.events)
+                    for event in result.events:
+                        record = {**asdict(event), "date": _ny_date(event.time)}
+                        if event.adjustment is None:
+                            del record["adjustment"]
+                        case["events"].append(record)
                     for trade in result.completed_trades:
                         if trade.exit_time > session.close_utc:
                             _point(case["equity"], session.close_utc, equity)
@@ -449,12 +467,16 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
             bars = next_bars
     for case in cases:
         case["stats"] = _stats(case, initial)
+    exit_only_bars = len(tail_bars) if tail_bars is not None else 0
+    fingerprinted_bars = sum(item["bars"] for item in retained_inputs) + warmup_bars + signal_bars + exit_only_bars
     return {
         "ticker": settings.ticker, "settings": _wire(settings), "scenarios": cases, "months": months, "benchmark": benchmark,
         "fingerprints": {"intraday_sha256": digest.hexdigest(), "daily_sha256": daily_digest},
         "coverage": {"start": signal_days[0].date.isoformat(), "end": signal_days[-1].date.isoformat(),
                      "cache_start": published_start, "cache_end": published_end, "signal_sessions": len(signal_days),
                      "signal_bars": signal_bars, "warmup_bars": warmup_bars,
+                     "retained_inputs": retained_inputs, "exit_only_bars": exit_only_bars,
+                     "fingerprinted_bars": fingerprinted_bars,
                      "next_open_tail": tail.date.isoformat() if tail else None, "volume_unit": metadata["volume_unit"],
                      **({"next_open_tail_unavailable": tail_error} if tail_error else {})},
     }
@@ -462,13 +484,19 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
 
 def output_path(path: Path | None, settings: BacktestSettings, coverage: dict | None = None, *,
                 config_path: Path | None = None) -> Path:
-    if path is None:
+    use_default = path is None
+    if use_default:
         if coverage is None:
             raise ValueError("Coverage is needed to name the default report.")
         path = Path("output") / f"SPY_5m_entry1_{coverage['start']}_{coverage['end']}.html"
     if os.name == "nt":
         _validate_windows_output_name(path)
-    candidate = path.resolve()
+    if use_default:
+        candidate = path.parent.resolve() / path.name
+        if candidate.is_symlink():
+            raise ValueError("The default report path cannot be a symbolic link.")
+    else:
+        candidate = path.resolve()
     if os.name == "nt":
         _validate_windows_output_name(candidate)
     protected = [settings.intraday_cache, settings.daily_cache]
@@ -484,7 +512,10 @@ def output_path(path: Path | None, settings: BacktestSettings, coverage: dict | 
     if candidate.suffix.lower() != ".html":
         raise ValueError("Report output must be an .html file.")
     if candidate.exists():
-        raise ValueError("Report already exists; use a different --output to keep the previous run.")
+        if not use_default:
+            raise ValueError("Report already exists; use a different --output to keep the previous run.")
+        if not candidate.is_file():
+            raise ValueError("The default report path must be a regular file.")
     for parent in candidate.parents:
         if parent.exists():
             if not parent.is_dir():
@@ -498,7 +529,8 @@ def main(argv=None) -> int:
     parser.add_argument("--config", type=Path, default=Path("config/SPY.toml"))
     parser.add_argument("--start", type=date.fromisoformat)
     parser.add_argument("--end", type=date.fromisoformat)
-    parser.add_argument("--output", type=Path)
+    parser.add_argument("--output", type=Path,
+                        help="Write to an unused HTML path. Omit to replace the default report.")
     args = parser.parse_args(argv)
     try:
         from .spy_5m_report import write_report
@@ -508,7 +540,7 @@ def main(argv=None) -> int:
         data = run(settings, args.start, args.end)
         if path is None:
             path = output_path(None, settings, data["coverage"], config_path=args.config)
-        write_report(path, data)
+        write_report(path, data, replace_existing=args.output is None)
     except (ValueError, OSError, sqlite3.Error) as exc:
         print(f"SPY backtest: {exc}", file=sys.stderr)
         return 1
