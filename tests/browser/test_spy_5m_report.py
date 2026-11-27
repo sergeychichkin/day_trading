@@ -85,9 +85,9 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     expect(page.locator("#scenario")).to_have_value("same_day_close")
     expect(page.locator("#month option")).to_have_text(["2025-11"])
     expect(page.locator("#execution")).to_contain_text("$0.005")
-    expect(page.locator("#trades th").first).to_have_css("cursor", "default")
-    expect(page.get_by_role("columnheader", name="Bear candle")).to_be_visible()
-    expect(page.locator("#trades tbody td").nth(2)).to_contain_text("09:45")
+    expect(page.locator("#trades th button").first).to_have_css("cursor", "pointer")
+    expect(page.get_by_role("columnheader", name="Bear candle")).to_have_count(0)
+    expect(page.locator("#trades .negative")).to_have_css("color", "rgb(255, 138, 138)")
     expect(page.get_by_role("columnheader", name="Profit factor")).to_be_visible()
     for scenario, factor in [("Same-day close", "0.00"), ("Next-session open", "∞")]:
         expect(page.get_by_role("row").filter(has_text=scenario).get_by_role("cell", name=factor, exact=True)).to_be_visible()
@@ -96,6 +96,7 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     expect(page.locator("#ending-equity")).to_have_text(f"${expected_equity[0]:,.2f}")
     page.locator("#scenario").select_option("next_session_open")
     expect(page.locator("#ending-equity")).to_have_text(f"${expected_equity[1]:,.2f}")
+    expect(page.locator("#trades .positive")).to_have_css("color", "rgb(88, 218, 186)")
     page.get_by_role("button", name="Show entry").click()
     expect(page.locator("#month")).to_have_value("2025-11")
     expect(page.locator("#trade-chart")).to_be_in_viewport()
@@ -111,6 +112,7 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     page.get_by_role("button", name="Show exit").click()
     expect(page.locator("#month")).to_have_value("2025-11")
     expect(page.locator("#chart-legend")).to_contain_text("Dec 1, 2025")
+    expect(page.locator("#selected-trade")).to_contain_text("0 of 20 following sessions")
     assert "Next open" in page.evaluate("spyMarkers.map(marker => marker.text)")
     page.locator("#scenario").select_option("same_day_close")
     expect(page.locator("#month option")).to_have_text(["2025-11"])
@@ -128,6 +130,85 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     assert all(label and "09:30" in label for label in labels)
 
 
+def test_trade_log_sorts_numbers_text_dates_and_missing_values(page, replay_files, tmp_path):
+    from qqq_viewer.backtest_spy_5m import load_settings, run
+    from qqq_viewer.spy_5m_report import write_report
+
+    _, _, config = replay_files
+    first, last = "2025-11-26", "2025-11-28"
+    data = run(load_settings(config), date.fromisoformat(first), date.fromisoformat(last))
+    trades = data["scenarios"][0]["trades"]
+    trades[0].update(pnl=100, exit_reason="same_day_close", prior_daily=None)
+    trades[1].update(pnl=20, exit_reason="protective_stop", prior_daily={"ema20_streak": -5})
+    output = tmp_path / "sortable.html"
+    write_report(output, data)
+    page.goto(output.as_uri())
+    log = page.locator("#trades")
+    assert log.locator("th").all_text_contents()[-4:] == ["Exit reason", "Commission", "Slippage", "Shares"]
+    expect(log.locator("th button")).to_have_count(19)
+    expect(log.get_by_role("columnheader", name="Daily ATR20 / Close (%)").locator("button br")).to_have_count(1)
+    sessions = log.locator("tbody td:first-child")
+    expect(sessions).to_have_text([first, last])
+
+    for name, ascending, descending in (
+        ("Net P&L", [last, first], [first, last]),
+        ("Exit reason", [last, first], [first, last]),
+        ("Daily EMA20 streak", [last, first], [last, first]),
+        ("Chart", [first, last], [last, first]),
+    ):
+        header = log.get_by_role("columnheader", name=name, exact=True)
+        control = header.get_by_role("button")
+        control.click()
+        expect(header).to_have_attribute("aria-sort", "ascending")
+        expect(sessions).to_have_text(ascending)
+        control.press("Enter")
+        expect(header).to_have_attribute("aria-sort", "descending")
+        expect(sessions).to_have_text(descending)
+        expect(log.locator("th[aria-sort]")).to_have_count(1)
+
+    log.get_by_role("button", name="Show entry", exact=True).first.click()
+    expect(page.locator("#selected-trade")).to_contain_text("Nov 28, 2025")
+    page.locator("#scenario").select_option("next_session_open")
+    expect(sessions).to_have_text([last, first])
+
+
+def test_trade_chart_shows_full_cached_window_outside_replay(page, replay_files, tmp_path):
+    from qqq_viewer.backtest_spy_5m import load_settings, run
+    from qqq_viewer.spy_5m_report import write_report
+    from qqq_viewer.spy_5m_store import sessions
+    from tests.test_spy_5m_replay import tape
+
+    store, _, config = replay_files
+    friday = date(2025, 11, 28)
+    following = sessions(date(2025, 12, 1), date(2026, 1, 31))[:21]
+    with store._connection(write=True) as db:
+        db.execute("DELETE FROM metadata WHERE key='verified_contiguous_start'")
+    for session in following[1:]:
+        _, bars = tape(day=session.date)
+        store.record(session, "complete", bars)
+    store.set_target(following[-1].date)
+    with store._connection(write=True) as db:
+        db.execute("INSERT INTO metadata VALUES ('verified_contiguous_start', '2025-11-25')")
+    data = run(load_settings(config), friday, friday)
+    trade = data["scenarios"][1]["trades"][0]
+    trade["prior_daily"].update(ema20_streak=1, volume_sma20_ratio=1.25,
+                                body_atr20_ratio=0.5, atr20_close_pct=1.75)
+    output = tmp_path / "trade-window.html"
+    write_report(output, data)
+    capture_price(page)
+    page.goto(output.as_uri())
+    page.locator("#scenario").select_option("next_session_open")
+    assert page.locator("#trades tbody td").all_text_contents()[10:14] == ["+1", "1.25", "0.50", "1.75%"]
+    prior, _ = sessions(date(2025, 11, 26), friday)
+    for control, left, right in [("Show entry", prior, following[-2]), ("Show exit", sessions(friday, friday)[0], following[-1])]:
+        page.get_by_role("button", name=control).click()
+        page.wait_for_function("""([from, to]) => {
+            const range = spyPriceChart.timeScale().getVisibleRange();
+            return range?.from === from && range?.to === to;
+        }""", arg=[left.open_utc, right.close_utc - 300])
+        expect(page.locator("#selected-trade")).not_to_contain_text("Cache coverage")
+
+
 def test_report_handles_no_trades(page, replay_files, tmp_path):
     from qqq_viewer.backtest_spy_5m import load_settings, run
     from qqq_viewer.spy_5m_report import write_report
@@ -142,7 +223,7 @@ def test_report_handles_no_trades(page, replay_files, tmp_path):
     write_report(output, run(load_settings(config), day, day))
     page.goto(output.as_uri())
     expect(page.locator("#trades")).to_contain_text("No trades for this exit scenario")
-    expect(page.locator("#trades tbody td")).to_have_attribute("colspan", "16")
+    expect(page.locator("#trades tbody td")).to_have_attribute("colspan", "19")
     expect(page.locator("#ending-equity")).to_have_text("$100,000.00")
     expect(page.locator("#scenarios tbody tr").first.get_by_role("cell", name="—", exact=True)).to_have_count(2)
 
@@ -306,9 +387,9 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     assert not {"Trigger", "Adverse gap vs. trigger/stop", "Ambiguous"}.intersection(headings)
     cells = page.locator("#trades tbody td").all_text_contents()
     assert cells[0] == "2025-11-26"
-    assert cells[1:4] == ["09:40", "09:45", "09:50"]
-    assert "Dec 1, 2025" in cells[6]
-    assert cells[10:12] == [f"{trade['mfe_r']:.2f}", f"{trade['mae_r']:.2f}"]
+    assert cells[1:3] == ["09:40", "09:50"]
+    assert "Dec 1, 2025" in cells[5]
+    assert cells[7:9] == [f"{trade['mfe_r']:.2f}", f"{trade['mae_r']:.2f}"]
     expect(page.locator("#event-month")).to_contain_text("2025-11 through 2025-12")
     rows = page.locator("#orders tbody tr").filter(has_text="Protective stop increase")
     expect(rows).to_have_count(2)

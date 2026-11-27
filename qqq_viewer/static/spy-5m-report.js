@@ -32,7 +32,7 @@ function chart(id, priceChart = false) {
         localization: {timeFormatter: timestamp},
         timeScale: {
             borderColor: "#273347", timeVisible: priceChart, lockVisibleTimeRangeOnResize: true,
-            ...(priceChart ? {tickMarkFormatter: (time, type) =>
+            ...(priceChart ? {minBarSpacing: 0.05, tickMarkFormatter: (time, type) =>
                 (type < 3 ? dayTick : clockTick).format(time * 1000)} : {}),
         },
     });
@@ -71,7 +71,16 @@ const atrOverlays = [
 const overlays = [];
 const scopedBars = new Map();
 const starts = new Map();
+const tradeMarkers = new Map();
+const tradeChartSessions = [...Object.values(data.months).flat(), ...(data.chart_context ?? [])]
+    .sort((a, b) => a.date.localeCompare(b.date));
+const tradeSessionsAfter = data.trade_chart_sessions_after ?? 20;
 let active = data.scenarios[0];
+
+intraday.subscribeClick(({hoveredObjectId}) => {
+    const marker = tradeMarkers.get(hoveredObjectId);
+    if (marker) jumpTrade(marker.trade, marker.exit);
+});
 
 function line(points, color, style = LightweightCharts.LineStyle.Solid, showSinglePoint = false) {
     if (points.length) {
@@ -144,10 +153,10 @@ function drawEvents(month, lastMonth) {
     }
 }
 
-function showSession(day, time) {
+function showSession(day, time, range) {
     const item = starts.get(day);
     if (!item) return;
-    intraday.timeScale().setVisibleLogicalRange({from: item.first, to: item.last});
+    intraday.timeScale().setVisibleLogicalRange(range ?? {from: item.first, to: item.last});
     const anchor = Math.min(time ?? item.session.open_utc, item.session.close_utc - STEP);
     legend(anchor);
 }
@@ -198,12 +207,13 @@ function drawStops(trade, sessions, endTime) {
     drawSegment(endTime);
 }
 
-function drawMonth(month, focusDay, focusTime) {
-    const sessions = chartSessions(month);
+function drawMonth(month, focusDay, focusTime, tradeWindow) {
+    const sessions = tradeWindow ?? chartSessions(month);
     get("month").value = month;
     get("selected-trade").textContent = "";
     scopedBars.clear();
     starts.clear();
+    tradeMarkers.clear();
     candles.setMarkers([]);
     for (const series of overlays.splice(0)) intraday.removeSeries(series);
     const prices = [];
@@ -229,7 +239,9 @@ function drawMonth(month, focusDay, focusTime) {
     for (const trade of charts) {
         if (starts.has(trade.date)) {
             markers.push({time: trade.signal_time, position: "aboveBar", shape: "circle", color: colors.upper, text: "Signal"});
-            markers.push({time: trade.entry_time, position: "belowBar", shape: "arrowUp", color: colors.up, text: "Buy"});
+            const id = `entry-${trade.entry_time}`;
+            markers.push({id, time: trade.entry_time, position: "belowBar", shape: "arrowUp", color: colors.up, text: "Buy"});
+            if (trade.exit_date) tradeMarkers.set(id, {trade, exit: false});
         }
         const end = trade.exit_time ?? trade.mark_time;
         if (sessions.length && trade.entry_time <= sessions.at(-1).close_utc && end >= sessions[0].open_utc) {
@@ -243,19 +255,31 @@ function drawMonth(month, focusDay, focusTime) {
         }
         if (starts.has(trade.exit_date)) {
             const {session} = starts.get(trade.exit_date);
-            markers.push({time: Math.min(trade.exit_time, session.close_utc - STEP),
+            const id = `exit-${trade.entry_time}`;
+            markers.push({id, time: Math.min(trade.exit_time, session.close_utc - STEP),
                 position: "aboveBar", shape: "arrowDown", color: colors.down,
                 text: exitMarkers[trade.exit_reason] + (trade.ambiguous ? " · ambiguous" : "")});
+            tradeMarkers.set(id, {trade, exit: true});
         }
     }
     candles.setMarkers(markers.sort((a, b) => a.time - b.time));
     intraday.priceScale("right").applyOptions({autoScale: true});
-    if (sessions.length) showSession(focusDay ?? sessions[0].date, focusTime);
-    drawEvents(month, sessions.at(-1)?.date.slice(0, 7) ?? month);
+    if (sessions.length) {
+        showSession(focusDay ?? sessions[0].date, focusTime,
+            tradeWindow ? {from: 0, to: prices.length - 1} : undefined);
+    }
+    drawEvents(tradeWindow ? sessions[0].date.slice(0, 7) : month, sessions.at(-1)?.date.slice(0, 7) ?? month);
 }
 
-function jump(day, time, description) {
-    if (starts.has(day)) showSession(day, time);
+function jump(day, time, description, tradeWindow, entryDay) {
+    if (tradeWindow) {
+        const month = get("month");
+        const target = day.slice(0, 7);
+        const selected = starts.has(day) ? month.value : target;
+        const pickerMonth = [...month.options].some(option => option.value === selected)
+            ? selected : entryDay.slice(0, 7);
+        drawMonth(pickerMonth, day, time, tradeWindow);
+    } else if (starts.has(day)) showSession(day, time);
     else drawMonth(day.slice(0, 7), day, time);
     get("selected-trade").textContent = description;
     const chartSection = get("trade-chart");
@@ -266,8 +290,14 @@ function jump(day, time, description) {
 function jumpTrade(trade, exit) {
     const day = exit ? trade.exit_date : trade.date;
     const time = exit ? trade.exit_time : trade.entry_time;
+    const index = tradeChartSessions.findIndex(session => session.date === day);
+    const window = index < 0 ? undefined : tradeChartSessions.slice(Math.max(index - 1, 0), index + tradeSessionsAfter + 1);
+    const after = tradeChartSessions.length - index - 1;
+    const shortfall = index === 0 || after < tradeSessionsAfter
+        ? ` · Cache coverage: ${index === 0 ? 0 : 1} of 1 prior, ${Math.min(after, tradeSessionsAfter)} of ${tradeSessionsAfter} following sessions`
+        : "";
     jump(day, time, `${exit ? "Exit" : "Entry"}: ${timestamp(time)} · ${exitNames[trade.exit_reason]}`
-        + (trade.ambiguous ? " · Ambiguous path: simulated entry then stop" : ""));
+        + (trade.ambiguous ? " · Ambiguous path: simulated entry then stop" : "") + shortfall, window, trade.date);
 }
 
 function button(label, click) {
@@ -278,22 +308,61 @@ function button(label, click) {
     return node;
 }
 
+const tradeTable = get("trades");
+const tradeHeaders = [...tradeTable.tHead.rows[0].cells];
+let sortedTradeHeader = null;
+let tradeSortDirection = 1;
+
+function tradeSortValue(trade, field) {
+    if (field === "exit_reason") return exitNames[trade.exit_reason];
+    return trade[field] ?? trade.prior_daily?.[field];
+}
+
+function compareTrades(a, b) {
+    const field = sortedTradeHeader.dataset.sort;
+    const first = tradeSortValue(a, field);
+    const second = tradeSortValue(b, field);
+    if (first == null) return second == null ? 0 : 1;
+    if (second == null) return -1;
+    const order = typeof first === "string" ? first.localeCompare(second) : first - second;
+    return tradeSortDirection * order;
+}
+
+for (const header of tradeHeaders) {
+    const control = button("", () => {
+        tradeSortDirection = sortedTradeHeader === header ? -tradeSortDirection : 1;
+        sortedTradeHeader?.removeAttribute("aria-sort");
+        sortedTradeHeader = header;
+        header.setAttribute("aria-sort", tradeSortDirection === 1 ? "ascending" : "descending");
+        drawTradeLog();
+    });
+    control.append(...header.childNodes);
+    header.append(control);
+}
+
 function drawTradeLog() {
-    const body = get("trades").tBodies[0];
+    const body = tradeTable.tBodies[0];
     body.replaceChildren();
     if (!active.trades.length) {
-        addRow(body, ["No trades for this exit scenario"]).cells[0].colSpan = get("trades").tHead.rows[0].cells.length;
+        addRow(body, ["No trades for this exit scenario"]).cells[0].colSpan = tradeHeaders.length;
         return;
     }
-    for (const trade of active.trades) {
-        const row = addRow(body, [trade.date, clockTime(trade.signal_time), clockTime(trade.bear_time), clockTime(trade.entry_time),
-            price(trade.entry_price), price(trade.initial_stop), timestamp(trade.exit_time),
-            price(trade.exit_price), exitNames[trade.exit_reason], count.format(trade.shares),
+    const trades = sortedTradeHeader ? [...active.trades].sort(compareTrades) : active.trades;
+    for (const trade of trades) {
+        const daily = trade.prior_daily ?? {};
+        const streak = daily.ema20_streak;
+        const row = addRow(body, [trade.date, clockTime(trade.signal_time), clockTime(trade.entry_time),
+            price(trade.entry_price), price(trade.initial_stop), timestamp(trade.exit_time), price(trade.exit_price),
             trade.mfe_r.toFixed(2), trade.mae_r.toFixed(2), money(trade.pnl),
-            money(trade.commission), money(trade.slippage),
+            streak > 0 ? `+${streak}` : streak ?? "—", daily.volume_sma20_ratio?.toFixed(2) ?? "—",
+            daily.body_atr20_ratio?.toFixed(2) ?? "—", pct(daily.atr20_close_pct),
+            "", exitNames[trade.exit_reason], money(trade.commission), money(trade.slippage), count.format(trade.shares),
         ]);
+        const pnl = row.cells[9];
+        if (trade.pnl > 0) pnl.classList.add("positive");
+        if (trade.pnl < 0) pnl.classList.add("negative");
         row.addEventListener("click", () => jumpTrade(trade, false));
-        const controls = row.insertCell();
+        const controls = row.cells[14];
         controls.append(button("Show entry", () => jumpTrade(trade, false)), " ", button("Show exit", () => jumpTrade(trade, true)));
     }
 }

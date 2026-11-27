@@ -22,12 +22,14 @@ from .spy_5m_report import _validate_windows_output_name
 from .spy_5m_snapshot import SQLITE_SIDECARS, read_snapshot
 from .spy_5m_store import BAR_FIELDS, FiveMinuteBar, expected_times, normalize_bar, publication, sessions
 from .spy_daily import DAILY_IDENTITY
+from .store import Bar
 
 SPY_CONTRACT = "756733"
 BAR_FINGERPRINT = struct.Struct("!q6d?")
 LEGACY_SPY_DAILY_SHA256 = "b955d740c3111250be921f84ecbffd72c37fe2fda8c8c255496a9a27918e9577"
 LABELS = {"same_day_close": "Same-day close", "next_session_open": "Next-session open",
           "trailing_stop": "Exit 3 · Trailing stop"}
+TRADE_CHART_SESSIONS_AFTER = 20
 
 
 @dataclass(frozen=True)
@@ -157,6 +159,55 @@ def _daily_snapshot(path):
     return daily, digest
 
 
+def _prior_daily_stats(daily, end):
+    if not daily:
+        return {}
+    calendar = sessions(date.fromisoformat(min(daily)), end)
+    stats = {}
+    atr = WilderATR(20)
+    volumes = deque(maxlen=20)
+    streak = 0
+    previous = None
+    for session in calendar:
+        day = session.date.isoformat()
+        stats[day] = previous
+        row = daily.get(day, {})
+        opening, high, low, close = (_positive(row.get(field)) for field in ("open", "high", "low", "close"))
+        if None in (opening, high, low, close) or not low <= min(opening, close) <= max(opening, close) <= high:
+            atr = WilderATR(20)
+            volumes.clear()
+            streak = 0
+            previous = None
+            continue
+
+        direction = row.get("ema_direction")
+        if direction == "up":
+            streak = max(streak, 0) + 1
+        elif direction == "down":
+            streak = min(streak, 0) - 1
+        else:
+            streak = 0
+
+        try:
+            volume = _numeric(row.get("volume"), "daily volume")
+        except ValueError:
+            volume = -1
+        if volume < 0:
+            volumes.clear()
+        else:
+            volumes.append(volume)
+        average = math.fsum(volumes) / 20 if len(volumes) == 20 else None
+        atr_value = atr.update(Bar(session.open_utc, opening, high, low, close, max(volume, 0)))
+        previous = {
+            "date": day,
+            "ema20_streak": streak if direction in ("up", "down", "neutral") else None,
+            "volume_sma20_ratio": volume / average if average else None,
+            "body_atr20_ratio": abs(close - opening) / atr_value if atr_value else None,
+            "atr20_close_pct": 100 * (atr_value / close) if atr_value is not None else None,
+        }
+    return stats
+
+
 def _opening_matches(daily_open, opening):
     return abs(Decimal(str(opening)) - Decimal(str(daily_open))) <= Decimal(str(daily_open)) * Decimal("0.05")
 
@@ -264,6 +315,24 @@ def _chart_bars(bars, atrs, volume_averages):
     return rows
 
 
+def _volume_averages(bars, volumes):
+    averages = []
+    for bar in bars:
+        volumes.append(bar.volume)
+        averages.append(math.fsum(volumes) / 20 if len(volumes) == 20 else None)
+    return averages
+
+
+def _chart_session(session, daily, bars, atrs, volume_averages, *, exit_only=False):
+    day = session.date.isoformat()
+    upper, lower, level_status = _levels(daily.get(day), bars[0].open)
+    return {
+        "date": day, "open_utc": session.open_utc, "close_utc": session.close_utc,
+        "upper": upper, "lower": lower, "levels_status": level_status,
+        "bars": _chart_bars(bars, atrs, volume_averages), "exit_only": exit_only,
+    }
+
+
 def _wire(settings):
     data = asdict(settings)
     exact = {}
@@ -312,6 +381,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     initial = float(starting_cash)
     balances = dict.fromkeys(modes, starting_cash)
     months, benchmark = {}, []
+    chart_context = []
     digest = hashlib.sha256()
     atr = WilderATR(20)
     volumes = deque(maxlen=20)
@@ -343,6 +413,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
             raise ValueError("No NYSE signal sessions in the selected date range.")
         days = [session for session in calendar if session.date <= signal_days[-1].date]
         signal_end = signal_days[-1].date
+        daily_stats = _prior_daily_stats(daily, signal_end)
         candidate = None
         before_cache = sessions(first - timedelta(days=14), first - timedelta(days=1))[-2:]
         for session in before_cache:
@@ -358,6 +429,11 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                     pass  # Only independently verified retained bars can seed the chart or validate an open.
                 else:
                     roles = []
+                    if seed_volume and signal_days[0] == calendar[0]:
+                        chart_context.append(_chart_session(
+                            session, daily, prior_bars, [None] * len(prior_bars),
+                            _volume_averages(prior_bars, deque(maxlen=20)),
+                        ))
                     if check_open:
                         level = _prior_lower(day, row, prior_bars[0].open)
                         roles.append("prior_open_check")
@@ -396,24 +472,18 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
             next_bars = (tail_bars if following == tail else _verified_bars(db, following)) if following else None
             _fingerprint_bars(digest, bars)
             atrs = [atr.update(bar) for bar in bars]
-            volume_averages = []
-            for bar in bars:
-                volumes.append(bar.volume)
-                volume_averages.append(math.fsum(volumes) / 20 if len(volumes) == 20 else None)
+            volume_averages = _volume_averages(bars, volumes)
             day = session.date.isoformat()
             priors = list(prior_levels)
             if settings.trailing_stop and session != tail:
                 prior_levels.appendleft(_prior_lower(day, daily.get(day, {}), bars[0].open))
             if session.date < start:
                 warmup_bars += len(bars)
+                if following == signal_days[0]:
+                    chart_context.append(_chart_session(session, daily, bars, atrs, volume_averages))
                 bars = next_bars
                 continue
-            upper, lower, level_status = _levels(daily.get(day), bars[0].open)
-            chart_session = {
-                "date": day, "open_utc": session.open_utc, "close_utc": session.close_utc, "upper": upper, "lower": lower,
-                "levels_status": level_status, "bars": _chart_bars(bars, atrs, volume_averages),
-                "exit_only": session == tail,
-            }
+            chart_session = _chart_session(session, daily, bars, atrs, volume_averages, exit_only=session == tail)
             if settings.trailing_stop and session != tail:
                 chart_session["prior_lowers"] = priors
             months.setdefault(day[:7], []).append(chart_session)
@@ -433,7 +503,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                     trailing = mode == "trailing_stop"
                     upcoming = following or candidate
                     result = replay_day(
-                        session, bars, atrs, upper, equity, settings.entry, settings.account, mode,
+                        session, bars, atrs, chart_session["upper"], equity, settings.entry, settings.account, mode,
                         next_open=next_open, position=position if trailing else None,
                         prior_lowers=tuple(item["lower"] for item in priors) if trailing else (None, None),
                         previous_session_date=previous_session_date if trailing else None,
@@ -445,7 +515,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                             case["open_position"] = _position_mark(position, session, bars[-1].close)
                     reason = result.skip_reason
                     if reason == "daily_upper_unavailable":
-                        reason = level_status
+                        reason = chart_session["levels_status"]
                     if reason:
                         case["skips"][reason] += 1
                     for event in result.events:
@@ -459,18 +529,30 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                         equity += trade.pnl
                         case["trades"].append({**asdict(trade), "date": _ny_date(trade.entry_time),
                                                 "exit_date": _ny_date(trade.exit_time),
+                                                "prior_daily": daily_stats.get(_ny_date(trade.signal_time)),
                                                 "pnl": float(trade.pnl), "equity_after": float(equity)})
                         _point(case["equity"], trade.exit_time, equity)
                         balances[mode] = equity
                     if not result.completed_trades or result.completed_trades[-1].exit_time <= session.close_utc:
                         _point(case["equity"], session.close_utc, equity)
             bars = next_bars
+        chart_end = days[-1].date
+        future_sessions = sessions(chart_end + timedelta(days=1), chart_end + timedelta(days=45))
+        for session in future_sessions[:TRADE_CHART_SESSIONS_AFTER]:
+            try:
+                bars = _verified_bars(db, session)
+            except ValueError:
+                break
+            chart_context.append(_chart_session(
+                session, daily, bars, [atr.update(bar) for bar in bars], _volume_averages(bars, volumes),
+            ))
     for case in cases:
         case["stats"] = _stats(case, initial)
     exit_only_bars = len(tail_bars) if tail_bars is not None else 0
     fingerprinted_bars = sum(item["bars"] for item in retained_inputs) + warmup_bars + signal_bars + exit_only_bars
     return {
         "ticker": settings.ticker, "settings": _wire(settings), "scenarios": cases, "months": months, "benchmark": benchmark,
+        "chart_context": chart_context, "trade_chart_sessions_after": TRADE_CHART_SESSIONS_AFTER,
         "fingerprints": {"intraday_sha256": digest.hexdigest(), "daily_sha256": daily_digest},
         "coverage": {"start": signal_days[0].date.isoformat(), "end": signal_days[-1].date.isoformat(),
                      "cache_start": published_start, "cache_end": published_end, "signal_sessions": len(signal_days),

@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 from dataclasses import replace
-from datetime import date, time
+from datetime import date, time, timedelta
 from pathlib import Path
 
 import pytest
@@ -95,6 +95,30 @@ def test_overlap_keeps_atr_and_ignores_current_daily_high_low_close(runner, repl
     assert missing["trades"] == [] and missing["skips"]["daily_upper_unavailable"] == 1
     with pytest.raises(ValueError, match="published"):
         runner.run(cfg, date(2025, 11, 24), november28)
+
+
+def test_trade_daily_stats_use_previous_nyse_session_and_reset_at_gaps(runner, replay_files):
+    _, daily, config = replay_files
+    friday = date(2025, 11, 28)
+    history = runner.sessions(friday - timedelta(days=42), friday - timedelta(days=1))[-24:]
+    rows = [dict(time=session.date.isoformat(), open=100, high=110, low=90, close=102, volume=100,
+                 ema_direction="down", upper=101, lower=98) for session in history]
+    rows[-1].update(volume=200)
+    rows.append(dict(rows[-1], time=friday.isoformat(), close=109, ema_direction="up", volume=99999))
+
+    def previous_stats():
+        daily.write_text(json.dumps({**DAILY_ID, "bars": rows}), encoding="utf-8")
+        data = runner.run(runner.load_settings(config), friday, friday)
+        return data["scenarios"][0]["trades"][0]["prior_daily"]
+
+    rows[-7]["ema_direction"] = "up"
+    assert previous_stats() == {"date": "2025-11-26", "ema20_streak": -5,
+                                "volume_sma20_ratio": pytest.approx(200 / 105),
+                                "body_atr20_ratio": 0.1, "atr20_close_pct": pytest.approx(100 * 20 / 102)}
+    rows[-2]["ema_direction"] = "up"
+    assert previous_stats()["ema20_streak"] == 1
+    del rows[-2]
+    assert previous_stats() is None
 
 
 @pytest.mark.parametrize("kind", [
