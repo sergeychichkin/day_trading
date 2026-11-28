@@ -18,10 +18,10 @@ from pathlib import Path
 
 from .opening_range import WilderATR, commission
 from .sessions import NEW_YORK
-from .spy_5m_replay import AccountSettings, EntrySettings, replay_day
+from .spy_5m_replay import AccountSettings, EntrySettings, replay_day, session_vwap_totals
 from .spy_5m_report import _validate_windows_output_name
 from .spy_5m_snapshot import SQLITE_SIDECARS, read_snapshot
-from .spy_5m_store import BAR_FIELDS, FiveMinuteBar, expected_times, normalize_bar, publication, sessions
+from .spy_5m_store import BAR_FIELDS, STEP, FiveMinuteBar, expected_times, normalize_bar, publication, sessions
 from .spy_daily import DAILY_IDENTITY
 from .store import Bar
 
@@ -88,9 +88,6 @@ def _settings_entry(values):
         raise ValueError("Use five-minute New York candle times without seconds or a time-zone offset.")
     if not time(9, 30) <= start <= end <= time(15, 55):
         raise ValueError("Entry window must be ordered and inside the 09:30–15:55 regular candle starts.")
-    minutes = entry.entry_order_valid_minutes
-    if type(minutes) is not int or minutes <= 0 or minutes % 5:
-        raise ValueError("Order lifetime must be a positive multiple of five minutes.")
     return entry
 
 
@@ -106,10 +103,15 @@ def load_settings(path: Path) -> BacktestSettings:
         if not isinstance(data.get(key), str) or not data[key].strip():
             raise ValueError(f"Set {key} to an input path.")
         inputs.append((path.parent / data[key]).resolve())
-    values = _table(data, "entry1", [field.name for field in fields(EntrySettings)] + ["stop_atr_buffer"])
+    values = _table(data, "entry1", [field.name for field in fields(EntrySettings)]
+                    + ["stop_atr_buffer", "entry_order_valid_minutes"])
     if "stop_atr_buffer" in values:
         del values["stop_atr_buffer"]
         warnings.warn("entry1.stop_atr_buffer is ignored. Entry 1 uses the session's daily Lower.",
+                      UserWarning, stacklevel=2)
+    if "entry_order_valid_minutes" in values:
+        del values["entry_order_valid_minutes"]
+        warnings.warn("entry1.entry_order_valid_minutes is ignored. Entry 1 expires at 09:35 ET next session.",
                       UserWarning, stacklevel=2)
     entry = _settings_entry(values)
     account_values = _table(data, "account", [f.name for f in fields(AccountSettings)])
@@ -308,15 +310,10 @@ def _stats(case, starting):
 
 
 def _chart_bars(bars, atrs, volume_averages):
-    weighted = volume = 0.0
-    rows = []
-    for bar, atr, average in zip(bars, atrs, volume_averages, strict=True):
-        if bar.volume:
-            weighted += bar.wap * bar.volume
-            volume += bar.volume
-        rows.append({**asdict(bar), "vwap": weighted / volume if volume else None,
-                     "atr": atr, "volume_sma_20": average})
-    return rows
+    return [{**asdict(bar), "vwap": float(weighted / volume) if volume else None,
+             "atr": atr, "volume_sma_20": average}
+            for bar, (weighted, volume), atr, average in zip(bars, session_vwap_totals(bars), atrs,
+                                                           volume_averages, strict=True)]
 
 
 def _volume_averages(bars, volumes):
@@ -351,6 +348,7 @@ def _wire(settings):
         data[key] = str(data[key])
     for key in ("entry1_start_time", "entry1_end_time"):
         data["entry"][key] = data["entry"][key].isoformat(timespec="minutes")
+    data["entry"]["expiry_next_session_et"] = "09:35"
     return data
 
 
@@ -379,8 +377,9 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     if not modes:
         raise ValueError("Enable at least one exit.")
     cases = [{"id": mode, "label": LABELS[mode], "trades": [], "events": [], "equity": [],
-              "skips": Counter(), "open_position": None}
+              "skips": Counter(), "open_position": None, "pending_entry": None}
              for mode in modes]
+    pending_entries = dict.fromkeys(modes)
     starting_cash = Decimal(str(settings.account.starting_balance))
     initial = float(starting_cash)
     balances = dict.fromkeys(modes, starting_cash)
@@ -450,8 +449,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                                             "volume_seed_bars": len(seed)})
             if settings.trailing_stop:
                 prior_levels.appendleft(level)
-        if settings.trailing_stop or settings.next_session_open:
-            candidate = next(iter(sessions(signal_end + timedelta(days=1), signal_end + timedelta(days=14))), None)
+        candidate = next(iter(sessions(signal_end + timedelta(days=1), signal_end + timedelta(days=14))), None)
         if settings.next_session_open:
             if candidate is None:
                 tail_error = "No next NYSE session found in the exchange calendar lookup."
@@ -512,12 +510,19 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                         session_lower=chart_session["lower"], next_open=next_open, position=position if trailing else None,
                         prior_lowers=tuple(item["lower"] for item in priors) if trailing else (None, None),
                         previous_session_date=previous_session_date if trailing else None,
-                        next_bar_open=upcoming.open_utc if trailing and upcoming else None,
+                        next_bar_open=upcoming.open_utc if upcoming else None,
+                        pending_entry=pending_entries[mode],
                     )
+                    pending_entries[mode] = result.pending_entry
                     if trailing:
                         position = result.position
-                        if position is not None and session.date == signal_end:
-                            case["open_position"] = _position_mark(position, session, bars[-1].close)
+                    if session.date == signal_end:
+                        if result.position is not None:
+                            case["open_position"] = _position_mark(result.position, session, bars[-1].close)
+                        if result.pending_entry is not None:
+                            order = result.pending_entry
+                            case["pending_entry"] = {"trigger": order.trigger, "expiry_time": order.expiry_time,
+                                                     "mark_time": max(bars[-1].time, order.bear_time + STEP)}
                     reason = result.skip_reason
                     if reason == "daily_upper_unavailable":
                         reason = chart_session["levels_status"]
@@ -527,6 +532,8 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                         record = {**asdict(event), "date": _ny_date(event.time)}
                         if event.adjustment is None:
                             del record["adjustment"]
+                        if event.order_id is None:
+                            del record["order_id"]
                         case["events"].append(record)
                     for trade in result.completed_trades:
                         if trade.exit_time > session.close_utc:
@@ -534,10 +541,11 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                         equity += trade.pnl
                         entry_date = _ny_date(trade.entry_time)
                         exit_date = _ny_date(trade.exit_time)
+                        signal_date = _ny_date(trade.signal_time)
                         case["trades"].append({**asdict(trade), "date": entry_date,
-                                                "exit_date": exit_date,
+                                                "exit_date": exit_date, "signal_date": signal_date,
                                                 "holding_days": session_index[exit_date] - session_index[entry_date] + 1,
-                                                "prior_daily": daily_stats.get(_ny_date(trade.signal_time)),
+                                                "prior_daily": daily_stats.get(signal_date),
                                                 "pnl": float(trade.pnl), "equity_after": float(equity)})
                         _point(case["equity"], trade.exit_time, equity)
                         balances[mode] = equity

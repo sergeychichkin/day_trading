@@ -17,8 +17,10 @@ def tape(overrides=None, day=date(2025, 11, 26)):
     values = {0: (100, 101, 98, 100), 1: (100, 101, 99, 99),
               2: (100, 102, 99, 101.5), 3: (101.5, 102, 100, 101)}
     values.update(overrides or {})
-    bars = [FiveMinuteBar(t, *values.get(i, (100, 101, 99, 100)), 10, 100)
-            for i, t in enumerate(expected_times(session))]
+    bars = []
+    for i, timestamp in enumerate(expected_times(session)):
+        opening, high, low, close = values.get(i, (100, 101, 99, 100))
+        bars.append(FiveMinuteBar(timestamp, opening, high, low, close, 10, min(max(101.5, low), high)))
     return session, bars
 
 
@@ -76,21 +78,93 @@ def test_carried_stop_executes_without_current_session_lower(replay):
     assert (trade.exit_reason, trade.exit_time) == ("protective_stop", session.open_utc)
 
 
-def test_order_activates_on_next_bar_and_expires_exclusive(replay):
-    session, _ = tape()
-    at_expiry = 4 + 24
-    assert simulate(replay, {at_expiry: (100, 110, 99, 105)}).trade is None
-    trade = simulate(replay, {at_expiry - 1: (100, 110, 99, 105)}).trade
-    assert trade.entry_time == session.open_utc + (at_expiry - 1) * 300
-    later_signal = {5: (100, 104, 98, 103), 6: (103, 104, 98, 100), 7: (100, 110, 98, 109)}
-    assert simulate(replay, later_signal, entry=replace(replay.EntrySettings(),
-                    entry1_end_time=time(10, 30), entry_order_valid_minutes=5)).trade is None
+@pytest.mark.parametrize(("vwaps", "bear_index"), [
+    ([102, 102, 102, 102, 102, 102], 3),
+    ([100, 100, 100, 102, 102, 102], 3),
+    ([100, 100, 100, 100, 102, 102], 5),
+    ([100, 100, 102, 100, 102, 102], None),
+    ([100, 100, 101, 101, 101, 101], None),
+])
+def test_vwap_sequence_uses_running_high_and_requires_confirmation_at_bear_close(replay, vwaps, bear_index):
+    session, bars = tape({0: (104, 105, 100, 104), 5: (101.5, 102, 99, 101),
+                          6: (105, 106, 100, 105.5)})
+    for i, wap in enumerate(vwaps):
+        bars[i] = replace(bars[i], wap=wap, volume=100 ** i)
+    result = replay.replay_day(session, bars, [2] * len(bars), 101, 100000,
+                               replay.EntrySettings(), replay.AccountSettings(), "same_day_close",
+                               session_lower=97.5)
+    if bear_index is None:
+        assert result.trade is None
+        assert not any(event.action == "submitted" for event in result.events)
+    else:
+        assert result.trade.bear_time == bars[bear_index].time
+        assert result.trade.entry_trigger == 105.5
+
+
+def test_vwap_equal_to_upper_after_confirmation_rejects_first_bear(replay):
+    session, bars = tape({5: (103, 104, 100, 102), 6: (104, 106, 100, 105)})
+    for index, wap in enumerate((101, 101, 102, 100, 104, 104)):
+        bars[index] = replace(bars[index], wap=wap)
+    result = replay.replay_day(session, bars, [2] * len(bars), 101, 100000,
+                               replay.EntrySettings(), replay.AccountSettings(), "same_day_close",
+                               session_lower=97.5)
+    assert result.skip_reason == "vwap_below_upper_at_bear"
+    assert not any(event.action == "submitted" for event in result.events)
+
+
+def test_fractional_vwap_equal_to_upper_never_confirms(replay):
+    session, bars = tape({4: (103, 105, 101, 104)})
+    bars = [replace(bar, wap=100.03, volume=3 if index == 0 else 0) for index, bar in enumerate(bars)]
+    result = replay.replay_day(session, bars, [2] * len(bars), 100.03, 100000,
+                               replay.EntrySettings(), replay.AccountSettings(), "same_day_close",
+                               session_lower=97.5)
+    assert result.skip_reason == "no_vwap_confirmation"
+    assert not any(event.action == "submitted" for event in result.events)
+
+
+@pytest.mark.parametrize(("first_high", "fill"), [(106, True), (105, False)])
+def test_order_carries_over_weekend_and_expires_before_935(replay, first_high, fill):
     early_day = date(2025, 11, 28)
     early, _ = tape(day=early_day)
-    result = simulate(replay, {3: (100, 101, 99, 100), 41: (101, 105, 99, 100)}, day=early_day)
+    monday, bars = tape({0: (104, first_high, 100, 104), 1: (104, 107, 100, 105)}, day=date(2025, 12, 1))
+    result = simulate(replay, {3: (100, 101, 99, 100), 41: (102, 105, 99, 100)}, day=early_day)
     assert result.trade is None
-    assert not any(event.action == "activated" for event in result.events)
-    assert early.close_utc - early.open_utc == 42 * 300
+    order = result.pending_entry
+    assert order.activation_time == monday.open_utc
+    assert order.expiry_time == monday.open_utc + 300
+    assert next(event.time for event in result.events if event.action == "submitted") == early.close_utc
+    result = replay.replay_day(monday, bars, [2] * len(bars), None, 100000,
+                               replay.EntrySettings(), replay.AccountSettings(), "same_day_close",
+                               pending_entry=order, session_lower=None)
+    assert result.pending_entry is None
+    if fill:
+        assert result.trade.entry_time == monday.open_utc
+        assert result.trade.exit_time == monday.close_utc
+        assert result.trade.initial_stop == 97.5
+    else:
+        assert result.trade is None
+        assert [event.time for event in result.events if event.action == "expired"] == [monday.open_utc + 300]
+
+
+def test_exit3_waits_until_second_session_after_overnight_fill(replay):
+    friday = simulate(replay, day=date(2025, 11, 28), mode="trailing_stop")
+    monday, bars = tape({0: (105, 106, 102, 105)}, day=date(2025, 12, 1))
+    opened = replay.replay_day(monday, bars, [2] * len(bars), None, 100000,
+                               replay.EntrySettings(), replay.AccountSettings(), "trailing_stop",
+                               pending_entry=friday.pending_entry, session_lower=107,
+                               prior_lowers=(107, 107))
+    assert opened.position.entry_time == monday.open_utc
+    assert opened.position.active_stop == 97.5
+    first = trail(replay, {0: (102, 106, 101, 105)}, day=date(2025, 12, 2),
+                  position=opened.position, lowers=(107, 97.5), upper=None)
+    assert first.position.active_stop == 97.5
+    assert first.position.stop_adjustments == ()
+    second = trail(replay, {0: (102, 106, 101, 105)}, day=date(2025, 12, 3),
+                   position=first.position, lowers=(107, 107), upper=None)
+    trade, = second.completed_trades
+    adjustment, = trade.stop_adjustments
+    assert adjustment.prior_session_count == 2
+    assert adjustment.effective_time == adjustment.candle_time + 300
 
 
 def test_size_and_costs_use_only_submission_inputs(replay):

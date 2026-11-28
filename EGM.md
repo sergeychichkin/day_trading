@@ -51,4 +51,4 @@ distinction between the January 2000 probe and the published start.
 
 The SPY Entry 1 backtest consumes the verified intraday cache and the Yahoo
 daily snapshot offline. It writes new standalone HTML reports and does not
-refresh either source. See the [dated reproduction steps](README.md#reproduce-the-november-24-2026-run).
+refresh either source. See the [backtest commands and strategy rules](README.md#spy-five-minute-entry-1-backtest).

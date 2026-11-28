@@ -17,7 +17,7 @@ const price = n => n == null ? "—" : px.format(n);
 const money = n => usd.format(n);
 const pct = n => n == null ? "—" : `${n.toFixed(2)}%`;
 const profitFactor = n => n === "infinite" ? "∞" : n == null ? "—" : n.toFixed(2);
-const colors = {up: "#10b981", down: "#ef4444", upper: "#f1c375", lower: "#7eb8f1", vwap: "#c6a1fa"};
+const colors = {up: "#10b981", down: "#ef4444", upper: "#f1c375", lower: "#7eb8f1", vwap: "#c6a1fa", order: "#58dbe5"};
 const exitNames = {protective_stop: "Protective stop", same_day_close: "Same-day close", next_session_open: "Next-session open"};
 const exitMarkers = {protective_stop: "Stop", same_day_close: "Day close", next_session_open: "Next open"};
 const STEP = 300;
@@ -58,18 +58,36 @@ const volumeAverage = intraday.addLineSeries({...quiet, ...volumeScale, title: "
 intraday.priceScale("volume").applyOptions({scaleMargins: {top: 0.81, bottom: 0.02}});
 const {high_atr_multiplier: highMultiplier, low_atr_multiplier: lowMultiplier} = data.settings.chart;
 const atrOverlays = [
-    {id: "high-atr", label: `High + ${highMultiplier} ATR`, field: "high", multiplier: highMultiplier, color: "#f4ae75"},
-    {id: "low-atr", label: `Low − ${lowMultiplier} ATR`, field: "low", multiplier: -lowMultiplier, color: "#85a5f1"},
-].map(({id, label, field, multiplier, color}) => {
-    const checkbox = get(id);
-    get(`${id}-label`).textContent = label;
+    {id: "high-atr", label: "High +", field: "high", direction: 1, multiplier: highMultiplier, color: "#f4ae75"},
+    {id: "low-atr", label: "Low −", field: "low", direction: -1, multiplier: lowMultiplier, color: "#85a5f1"},
+].map(guide => {
+    const checkbox = get(guide.id);
+    const input = get(`${guide.id}-multiplier`);
     checkbox.checked = false;
-    const series = intraday.addLineSeries({...quiet, title: label, color, visible: false, lineWidth: 1});
-    checkbox.addEventListener("change", () => series.applyOptions({visible: checkbox.checked}));
-    return {field, multiplier, series};
+    input.value = guide.multiplier;
+    const title = atrLabel(guide);
+    checkbox.setAttribute("aria-label", title);
+    const series = intraday.addLineSeries({...quiet, title, color: guide.color, visible: false, lineWidth: 1});
+    const overlay = {...guide, checkbox, series};
+    checkbox.addEventListener("change", () => {
+        series.applyOptions({visible: checkbox.checked});
+        legend(legendTime);
+    });
+    input.addEventListener("input", () => {
+        if (!input.validity.valid || !Number.isFinite(input.valueAsNumber)) return;
+        overlay.multiplier = input.valueAsNumber;
+        const title = atrLabel(overlay);
+        checkbox.setAttribute("aria-label", title);
+        series.applyOptions({title});
+        drawATR(overlay);
+        legend(legendTime);
+    });
+    input.addEventListener("blur", () => { input.value = overlay.multiplier; });
+    return overlay;
 });
 const overlays = [];
 const scopedBars = new Map();
+let legendTime = null;
 const starts = new Map();
 const tradeMarkers = new Map();
 const tradeChartSessions = [...Object.values(data.months).flat(), ...(data.chart_context ?? [])]
@@ -82,9 +100,9 @@ intraday.subscribeClick(({hoveredObjectId}) => {
     if (marker) jumpTrade(marker.trade, marker.exit);
 });
 
-function line(points, color, style = LightweightCharts.LineStyle.Solid, showSinglePoint = false) {
+function line(points, color, style = LightweightCharts.LineStyle.Solid, showSinglePoint = false, title = "") {
     if (points.length) {
-        const series = intraday.addLineSeries({...quiet, color, lineStyle: style, lineWidth: 1,
+        const series = intraday.addLineSeries({...quiet, title, color, lineStyle: style, lineWidth: 1,
             pointMarkersVisible: showSinglePoint && points.length === 1, pointMarkersRadius: 3});
         series.setData(points);
         overlays.push(series);
@@ -101,11 +119,18 @@ function horizontal(start, end, value, color, style, showSinglePoint = false) {
 function legend(time) {
     const item = scopedBars.get(time);
     if (!item) return;
+    legendTime = time;
     const {bar, session} = item;
     const text = [timestamp(time), `O ${price(bar.open)}`, `H ${price(bar.high)}`, `L ${price(bar.low)}`,
         `C ${price(bar.close)}`, `Vol ${count.format(bar.volume)} ${data.coverage.volume_unit}`,
         `Vol SMA(20) ${price(bar.volume_sma_20)}`, `VWAP ${price(bar.vwap)}`,
         `Upper ${price(session.upper)}`, `Lower ${price(session.lower)}`];
+    for (const overlay of atrOverlays) {
+        if (!overlay.checkbox.checked) continue;
+        const buffer = atrBuffer(bar, overlay);
+        const level = buffer == null ? null : bar[overlay.field] + buffer;
+        text.push(`${atrLabel(overlay)} (buffer ${price(buffer == null ? null : Math.abs(buffer))}) = ${price(level)}`);
+    }
     if (session.levels_status !== "available") text.push(session.levels_status.replaceAll("_", " "));
     if (session.exit_only) text.push("Exit-only session");
     get("chart-legend").textContent = text.join(" · ");
@@ -174,6 +199,26 @@ function chartSessions(month) {
     return [...scenarioSessions(month), ...scenarioSessions(nextMonth(month))];
 }
 
+function atrLabel({label, multiplier}) {
+    return `${label} ${multiplier} ATR`;
+}
+
+function atrBuffer(bar, {multiplier, direction}) {
+    const buffer = direction * multiplier * bar.atr;
+    return bar.atr != null && Number.isFinite(buffer) ? buffer : null;
+}
+
+function drawATR(overlay) {
+    const points = [];
+    for (const {bar} of scopedBars.values()) {
+        const buffer = atrBuffer(bar, overlay);
+        if (buffer == null) continue;
+        const value = bar[overlay.field] + buffer;
+        if (Number.isFinite(value)) points.push({time: bar.time, value});
+    }
+    overlay.series.setData(points);
+}
+
 function drawVolumeAndATR(prices) {
     volume.setData(prices.map(bar => ({
         time: bar.time, value: bar.volume,
@@ -181,11 +226,7 @@ function drawVolumeAndATR(prices) {
     })));
     volumeAverage.setData(prices.filter(bar => bar.volume_sma_20 != null)
         .map(bar => ({time: bar.time, value: bar.volume_sma_20})));
-    for (const {field, multiplier, series} of atrOverlays) {
-        series.setData(prices.filter(bar => bar.atr != null)
-            .map(bar => ({time: bar.time, value: bar[field] + multiplier * bar.atr}))
-            .filter(point => Number.isFinite(point.value)));
-    }
+    atrOverlays.forEach(drawATR);
 }
 
 function drawStops(trade, sessions, endTime) {
@@ -207,38 +248,69 @@ function drawStops(trade, sessions, endTime) {
     drawSegment(endTime);
 }
 
+function drawEntryOrders(sessions, prices) {
+    if (!sessions.length) return;
+    const orders = new Map();
+    for (const event of active.events) {
+        if (event.action === "submitted" && event.order_id != null) {
+            orders.set(event.order_id, {start: event.time, value: event.trigger});
+        } else if (["filled", "expired", "rejected"].includes(event.action) && orders.has(event.order_id)) {
+            orders.get(event.order_id).end = event.time;
+        }
+    }
+    const sessionCloses = new Map([...starts.values()].map(item => [item.session.close_utc, item]));
+    for (const {start, value, end = active.pending_entry?.mark_time} of orders.values()) {
+        if (end == null || end < prices[0].time || start > sessions.at(-1).close_utc) continue;
+        const points = prices.filter(bar => bar.time >= start && bar.time <= end)
+            .map(bar => ({time: bar.time, value}));
+        const closingSession = sessionCloses.get(start);
+        if (closingSession) {
+            points.unshift({time: start, value});
+            closingSession.hasClosingOrder = true;
+        }
+        line(points, colors.order, LightweightCharts.LineStyle.Solid, true, "Buy stop");
+    }
+}
+
 function drawMonth(month, focusDay, focusTime, tradeWindow) {
     const sessions = tradeWindow ?? chartSessions(month);
     get("month").value = month;
     get("selected-trade").textContent = "";
     scopedBars.clear();
+    legendTime = null;
     starts.clear();
     tradeMarkers.clear();
     candles.setMarkers([]);
     for (const series of overlays.splice(0)) intraday.removeSeries(series);
     const prices = [];
     for (const session of sessions) {
-        const first = prices.length;
         for (const bar of session.bars) {
             prices.push(bar);
             scopedBars.set(bar.time, {bar, session});
         }
-        starts.set(session.date, {first, last: prices.length - 1, session});
+        starts.set(session.date, {session, hasClosingOrder: false});
     }
     candles.setData(prices);
     drawVolumeAndATR(prices);
+    drawEntryOrders(sessions, prices);
+    let chartPoints = 0;
+    for (const item of starts.values()) {
+        item.first = chartPoints;
+        chartPoints += item.session.bars.length + Number(item.hasClosingOrder);
+        item.last = chartPoints - 1;
+    }
     for (const session of sessions) {
         const lastBar = session.close_utc - STEP;
         horizontal(session.open_utc, lastBar, session.upper, colors.upper);
         horizontal(session.open_utc, lastBar, session.lower, colors.lower);
         line(session.bars.filter(bar => bar.vwap != null).map(bar => ({time: bar.time, value: bar.vwap})), colors.vwap);
     }
-    const markers = [];
+    const markers = active.events.filter(event => event.action === "signal" && scopedBars.has(event.time - STEP))
+        .map(event => ({time: event.time - STEP, position: "aboveBar", shape: "circle", color: colors.upper, text: "Signal"}));
     const position = active.open_position;
     const charts = position ? [...active.trades, {...position, date: position.entry_date}] : active.trades;
     for (const trade of charts) {
-        if (starts.has(trade.date)) {
-            markers.push({time: trade.signal_time, position: "aboveBar", shape: "circle", color: colors.upper, text: "Signal"});
+        if (scopedBars.has(trade.entry_time)) {
             const id = `entry-${trade.entry_time}`;
             markers.push({id, time: trade.entry_time, position: "belowBar", shape: "arrowUp", color: colors.up, text: "Buy"});
             if (trade.exit_date) tradeMarkers.set(id, {trade, exit: false});
@@ -266,7 +338,7 @@ function drawMonth(month, focusDay, focusTime, tradeWindow) {
     intraday.priceScale("right").applyOptions({autoScale: true});
     if (sessions.length) {
         showSession(focusDay ?? sessions[0].date, focusTime,
-            tradeWindow ? {from: 0, to: prices.length - 1} : undefined);
+            tradeWindow ? {from: 0, to: chartPoints - 1} : undefined);
     }
     drawEvents(tradeWindow ? sessions[0].date.slice(0, 7) : month, sessions.at(-1)?.date.slice(0, 7) ?? month);
 }
@@ -351,7 +423,9 @@ function drawTradeLog() {
     for (const trade of trades) {
         const daily = trade.prior_daily ?? {};
         const streak = daily.ema20_streak;
-        const row = addRow(body, [trade.date, clockTime(trade.signal_time), clockTime(trade.entry_time),
+        const signalTime = trade.signal_date && trade.signal_date !== trade.date
+            ? timestamp(trade.signal_time) : clockTime(trade.signal_time);
+        const row = addRow(body, [trade.date, signalTime, clockTime(trade.entry_time),
             price(trade.entry_price), price(trade.initial_stop), timestamp(trade.exit_time), price(trade.exit_price),
             trade.holding_days ?? "—", trade.mfe_r.toFixed(2), trade.mae_r.toFixed(2), money(trade.pnl),
             streak > 0 ? `+${streak}` : streak ?? "—", daily.volume_sma20_ratio?.toFixed(2) ?? "—",
@@ -404,6 +478,9 @@ function drawScenario() {
     get("skips").textContent = skips.length ? `New-entry skips (${active.label}) · ${skips.join(" · ")}` : "";
     drawTradeLog();
     drawOpenPosition();
+    const pending = active.pending_entry;
+    get("pending-entry").textContent = pending
+        ? `Pending buy stop at cutoff · ${price(pending.trigger)} · Expires ${timestamp(pending.expiry_time)} ET` : "";
     const picker = get("month");
     const previous = picker.value;
     const months = Object.keys(data.months).filter(month => scenarioSessions(month).length);
@@ -430,14 +507,15 @@ get("coverage").textContent = `${count.format(c.signal_sessions)} signal session
     + (c.retained_inputs.length ? " · See input coverage for retained sessions" : "")
     + (c.next_open_tail ? ` · ${c.next_open_tail} included only for a next-open exit (${count.format(c.exit_only_bars)} bars)` : "")
     + (c.next_open_tail_unavailable ? ` · Next open unavailable: ${c.next_open_tail_unavailable}` : "");
-get("execution").textContent = `ATR(20) carries across regular sessions. The entry trigger buffer is ${entry.entry_atr_buffer} × ATR(20). `
-    + "Initial stop uses the entry session's daily Lower rounded down to the configured tick. "
-    + `Order activates on the following bar for up to ${entry.entry_order_valid_minutes} minutes. Slippage is at least `
+get("execution").textContent = `After a bull close above daily Upper, VWAP must confirm and still be above Upper at the first eligible bear close. `
+    + `The buy stop uses the session high through that candle plus ${entry.entry_atr_buffer} × ATR(20). `
+    + "Initial stop uses the signal session's daily Lower rounded down to the configured tick. "
+    + "The cyan buy-stop line runs from submission to fill or expiry. Orders activate on the next regular-session bar and expire at 09:35 ET the next NYSE session. Slippage is at least "
     + `$${data.settings.account_exact?.slippage_floor ?? account.slippage_floor} or ${account.slippage_bps} bp per fill. `
     + "Ambiguous five-minute paths assume entry then stop. "
     + "Gaps, costs and slippage can raise losses above the sizing budget."
-    + (data.settings.trailing_stop ? " Exit 3 keeps the original stop on the entry session. The first following NYSE session checks the same Lower,"
-        + " which cannot raise the stop. Later sessions can use either of the two preceding daily Lowers."
+    + (data.settings.trailing_stop ? " Exit 3 keeps the original stop through the first NYSE session after the fill."
+        + " Later sessions can use either of the two preceding daily Lowers."
         + " A higher stop applies from the next bar." : "");
 get("provenance").textContent = JSON.stringify({settings: data.settings, fingerprints: data.fingerprints, coverage: c}, null, 2);
 benchmark.setData(data.benchmark);

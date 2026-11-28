@@ -8,6 +8,7 @@
     button { font: inherit; color: inherit; background: #172335; border: 1px solid #3c4c63; border-radius: 5px; padding: 3px 7px; cursor: pointer; }
     button:focus-visible { outline: 2px solid #70b9ee; }
     #orders { min-width: 770px; }
+    .buy-stop { color: #58dbe5; }
     #trades th { padding: 0; }
     #trades td { padding-inline: 7px; }
     #trades th button { width: 100%; padding: 7px; border: 0; background: none; text-align: inherit; }
@@ -15,6 +16,9 @@
     #trades th[aria-sort="ascending"] button::after { content: " ▲" / ""; }
     #trades th[aria-sort="descending"] button::after { content: " ▼" / ""; }
     .toolbar { flex-wrap: wrap; }
+    .atr-control { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .atr-control input[type="number"] { width: 5rem; font: inherit; color: inherit; background: #172335;
+        border: 1px solid #3c4c63; border-radius: 5px; padding: 3px 5px; }
 </style>
 </head>
 <body>
@@ -39,6 +43,7 @@
     </table></div>
     <p class="muted">Profit factor divides total net gains by absolute total net losses. ∞ means gains without losses; — means no nonzero trades.</p>
     <div id="open-position" hidden></div>
+    <div id="pending-entry"></div>
 </section>
 <section aria-labelledby="equity-heading">
     <h2 id="equity-heading">Closed Balance and Drawdown</h2>
@@ -48,11 +53,14 @@
 <section id="trade-chart" aria-labelledby="chart-heading" tabindex="-1">
     <div class="toolbar"><h2 id="chart-heading">Price, Levels and Trades</h2>
         <label>Month <select id="month"></select></label>
-        <label><input type="checkbox" id="high-atr"> <span id="high-atr-label"></span></label>
-        <label><input type="checkbox" id="low-atr"> <span id="low-atr-label"></span></label>
+        <span class="atr-control"><input type="checkbox" id="high-atr"><label for="high-atr">High +</label>
+            <input type="number" id="high-atr-multiplier" min="0" step="any" aria-label="High ATR multiplier"> ATR</span>
+        <span class="atr-control"><input type="checkbox" id="low-atr"><label for="low-atr">Low −</label>
+            <input type="number" id="low-atr-multiplier" min="0" step="any" aria-label="Low ATR multiplier"> ATR</span>
     </div>
     <p class="key"><span class="signal">Daily upper · Bull signal</span><span class="benchmark">Daily lower</span>
         <span class="stress">Session VWAP</span><span class="base">Volume SMA(20)</span>
+        <span class="buy-stop">Buy stop</span>
         <span class="negative">Protective stop (dashed line or single-bar dot)</span></p>
     <p id="chart-legend"></p><div id="price"></div><p id="selected-trade" class="muted" aria-live="polite"></p>
 </section>

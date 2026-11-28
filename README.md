@@ -142,26 +142,19 @@ A run starts flat with the configured cash at its first signal session.
 The earlier history supplies indicator warmup and prior daily levels.
 Moving `--start` into an existing trade's dates starts a fresh replay.
 
-[`config/SPY.toml`](config/SPY.toml) controls the entry window, the buy trigger's ATR buffer, the order lifetime, equity and risk, and execution costs. Signal times label five-minute candle **starts**, in New York time. Only the first qualifying bull close can arm a setup. The first later bear can occur after the signal window. At the bear close the runner sets the buy trigger to the bear high plus the ATR buffer, rounded up to the configured tick. It sets the initial protective stop to the session's plotted daily Lower, rounded down to the tick, and sizes the order from that stop. A missing Lower or a rounded stop outside the valid range prevents submission. The order becomes eligible on the next bar and expires by the regular-session close.
+### Entry 1
 
-Set `entry1_start_time` and `entry1_end_time` in `[entry1]`. TOML accepts
-quoted times such as `"09:30"` or local time literals such as `09:30:00` on
-the same five-minute grid.
+1. The first bull candle to close above daily Upper in the configured window starts the setup. Wait for session VWAP to be strictly above Upper, then take the first bear candle at or after confirmation. VWAP may confirm on the breakout or bear candle. If VWAP is at or below Upper at that bear close, the setup ends.
+2. Place a buy stop at the regular-session high through the bear candle plus the configured ATR(20) buffer, rounded up to the tick. Size the order using the signal session's Daily Lower as the protective stop, rounded down to the tick. A missing or invalid stop prevents submission.
+3. The buy stop becomes eligible on the next regular-session bar and expires at 9:35 a.m. New York time the next NYSE session. The next session's 9:30 candle can fill it. The report's cyan buy-stop line ends at the fill candle or expiry. An order still active at the replay cutoff is shown as pending.
 
-Exit 3 is enabled by default. One position can stay open across regular sessions
-until its protective stop is hit. The entry session uses the original stop.
-The first following NYSE session checks the same daily Lower that set the
-initial stop, so that level cannot raise it. On later sessions, either of the two immediately
-preceding sessions' valid daily lowers can qualify. If a bull candle's high is
-strictly below an eligible lower, the stop can rise to the candle low minus half
-its ATR(20), floored to a tick and effective from the next bar. The report shows
-any position still open at the replay cutoff.
-The prior levels are the stored Yahoo daily snapshot's `lower` prices.
-The backtester compares the daily and verified five-minute opens for that
-date when both are available, allowing up to a 5% difference. The separate
-five-minute viewer also checks the close and can suppress a level the
-backtester uses. Adjustment events show the eligible prior lookup results and the
-triggering and effective candle times in New York.
+Set `entry1_start_time`, `entry1_end_time` and `entry_atr_buffer` in [`config/SPY.toml`](config/SPY.toml). The window uses five-minute candle start times in New York and applies to the breakout. TOML accepts `"09:30"` and `09:30:00`.
+
+### Exit 3
+
+The default exit carries the position until stopped. Keep the initial stop through the first NYSE session after the fill. From the second following session onward, a bull candle with a high strictly below either of the preceding two sessions' valid Daily Lowers can raise the stop. Use the candle low minus half its ATR(20), rounded down to the tick. Apply a higher stop from the next bar. The report shows any position still open at cutoff.
+
+Daily Lowers come from the Yahoo snapshot. When both opens are available, the replay allows up to a 5% difference between the daily and verified five-minute opens. Adjustment events show the prior level lookups and the stop's trigger and effective times.
 
 To run the legacy exits, copy the TOML alongside the original and enable
 `same_day_close` or `next_session_open` in `[exits]`. Set `trailing_stop = false`
@@ -183,8 +176,9 @@ price pane. A verified session immediately before publication can supply the
 19 preceding SMA bars. ATR starts warming up at publication. The report's
 input coverage lists any retained sessions hashed for the SMA or prior-open
 checks, their bar counts and roles, and the total number of fingerprinted
-bars. The High and Low ATR checkboxes start off. Set their multipliers
-under `[chart]` to change the guides without affecting the strategy.
+bars. The High and Low ATR guides start off. Edit each multiplier in the chart
+toolbar. The legend shows the buffer amount and guide price for each enabled
+overlay at the selected candle. Set the report defaults under `[chart]`.
 Trade and order-event buttons bring the selected session into view. The chart
 marks protective stops and their adjustments, same-day closes, next opens,
 and ambiguous stop bars. MFE and MAE use the simulated entry fill minus the
@@ -197,42 +191,3 @@ reflected in net P&L.
 **Profit factor** is total net P&L from winning trades divided by the absolute
 net P&L from losing trades, after modeled costs. It is calculated separately
 for each exit scenario; `∞` means wins without losses and `—` means no nonzero trades.
-
-### Reproduce the November 24, 2026 run
-
-On a fresh checkout, install the package as described above. Use the archived
-inputs for an exact reproduction. To rebuild with current provider data, use
-the [dated TWS publisher command](docs/spy-5m-coverage.md#published-uninterrupted-range)
-and download Yahoo levels with `python -m qqq_viewer.spy_daily --cache
-data/spy_daily_rebuild.json`. Point a copy of `config/SPY.toml` at those two
-rebuild files; the commands use separate paths so they do not replace installed
-caches. A provider rebuild may differ from the archived inputs.
-
-With the archived inputs at the paths in `config/SPY.toml`, run these from
-the repository root. If a report already exists, choose a new output name.
-
-```powershell
-$python = ".\.venv\Scripts\python.exe"
-$sameDay = "config/SPY_same_day_replay.toml"
-$comparison = "config/SPY_exit_comparison_replay.toml"
-if ((Test-Path $sameDay) -or (Test-Path $comparison)) { throw "Choose unused replay config paths." }
-$legacy = (Get-Content config/SPY.toml -Raw).Replace("same_day_close = false", "same_day_close = true").Replace("trailing_stop = true", "trailing_stop = false")
-$legacy | Set-Content -Encoding ascii $sameDay
-$legacy.Replace("next_session_open = false", "next_session_open = true") | Set-Content -Encoding ascii $comparison
-& $python -m qqq_viewer.backtest_spy_5m --config $sameDay --start 2013-12-24 --end 2026-11-24 --output output/SPY_5m_entry1_2013-12-24_2026-11-24_replay.html
-& $python -m qqq_viewer.backtest_spy_5m --config $comparison --start 2013-12-24 --end 2026-11-24 --output output/SPY_5m_entry1_exit_comparison_2013-12-24_2026-11-24_replay.html
-```
-
-Expected archived-input coverage: **3,249 signal sessions and 252,450 bars**;
-**71 trades** in each exit scenario. Under **Settings, input fingerprints and
-coverage**, compare the SHA-256 values below. The archived intraday hash
-covers the replay's canonical bar records. Input coverage lists its counts.
-
-- Intraday: `37d8a0626c5d9d1ea470bb358dde7713dad60f6828c0dcfa9c864682cc18cc29`
-- Daily: `b955d740c3111250be921f84ecbffd72c37fe2fda8c8c255496a9a27918e9577`
-
-New daily snapshots identify themselves as SPY/Yahoo Finance (`yahoo-daily-v1`).
-The runner accepts the exact archived legacy daily file by its fingerprint,
-without modifying it. Refresh any other unlabeled file to a new path rather
-than assuming its ticker or changing its metadata by hand. The archived market
-data itself is not in Git.

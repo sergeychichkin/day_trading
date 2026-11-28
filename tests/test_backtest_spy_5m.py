@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from qqq_viewer.spy_5m_store import FiveMinuteStore
+from qqq_viewer.spy_5m_store import FiveMinuteStore, sessions
 from tests.test_spy_5m_replay import tape
 
 DAILY_ID = {"schema": "yahoo-daily-v1", "ticker": "SPY", "source": "Yahoo Finance"}
@@ -27,7 +27,7 @@ def replay_files(tmp_path):
     for index, day in enumerate(targets):
         overrides = {4: (103, 105, 101, 104)}
         if index >= 2:
-            overrides[0] = (104, 105, 98, 104)
+            overrides[0] = (104, 104, 98, 104)
         session, bars = tape(overrides, day=date.fromisoformat(day))
         store.record(session, "complete", bars)
     store.set_target(session.date)
@@ -45,7 +45,7 @@ def replay_files(tmp_path):
 def test_config_defaults_and_validation(runner, tmp_path):
     cfg = runner.load_settings(Path("config/SPY.toml"))
     assert (cfg.entry.entry1_start_time, cfg.entry.entry1_end_time) == (time(9, 30), time(9, 40))
-    assert (cfg.entry.entry_atr_buffer, cfg.entry.entry_order_valid_minutes) == (0.25, 120)
+    assert cfg.entry.entry_atr_buffer == 0.25
     assert (cfg.account.starting_balance, cfg.account.risk_pct, cfg.account.cash_cap) == (100000, 1, 1)
     assert cfg.trailing_stop and not (cfg.same_day_close or cfg.next_session_open)
     assert (cfg.chart.high_atr_multiplier, cfg.chart.low_atr_multiplier) == (0.25, 0.5)
@@ -54,7 +54,6 @@ def test_config_defaults_and_validation(runner, tmp_path):
     for custom, match in [
         ('[entry1]\nentry1_start_time="09:32"', "five-minute"),
         ('[entry1]\nentry1_end_time="09:25"', "window"),
-        ('[entry1]\nentry_order_valid_minutes=12', "minutes"),
         ('[account]\nstarting_balance=nan', "finite"),
         ('[account]\ncash_cap=2', "cash_cap"),
         ('[exits]\nsame_day_close=false', "exit"),
@@ -66,6 +65,43 @@ def test_config_defaults_and_validation(runner, tmp_path):
     path.write_text('ticker="QQQ"\nintraday_cache="cache.db"\ndaily_cache="daily.json"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="SPY"):
         runner.load_settings(path)
+
+
+def test_legacy_order_lifetime_loads_with_notice(runner, replay_files):
+    _, _, config = replay_files
+    with config.open("a", encoding="utf-8") as stream:
+        stream.write("[entry1]\nentry_order_valid_minutes=120\n")
+    with pytest.warns(UserWarning, match="09:35 ET next session"):
+        runner.load_settings(config)
+
+
+@pytest.mark.parametrize("outcome", ["filled", "expired", "rejected"])
+def test_runner_tracks_overnight_order_across_month_and_cutoff(runner, replay_files, outcome):
+    store, _, config = replay_files
+    friday, monday = map(date.fromisoformat, ("2025-11-28", "2025-12-01"))
+    friday_session, monday_session = sessions(friday, monday)
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=102,high=104,close=103 WHERE time=?", (friday_session.open_utc + 1200,))
+        opening, high = {"filled": (105, 106), "expired": (104, 104), "rejected": (800, 801)}[outcome]
+        db.execute("UPDATE bars SET open=?,high=?,close=? WHERE time=?", (opening, high, opening, monday_session.open_utc))
+        db.execute("UPDATE bars SET high=107 WHERE time=?", (monday_session.open_utc + 300,))
+    cfg = runner.load_settings(config)
+    short = runner.run(cfg, friday, friday)["scenarios"][0]
+    assert short["pending_entry"]["expiry_time"] == monday_session.open_utc + 300
+    assert short["pending_entry"]["mark_time"] == friday_session.close_utc - 300
+    assert not any(event["action"] in {"filled", "expired"} for event in short["events"])
+    full = runner.run(cfg, friday, monday)["scenarios"]
+    for case in full:
+        submitted = next(event for event in case["events"] if event["action"] == "submitted")
+        order_events = [event for event in case["events"] if event.get("order_id") == submitted["order_id"]]
+        terminal = order_events[-1]
+        assert terminal["action"] == outcome
+        assert terminal["trigger"] == submitted["trigger"]
+        assert terminal["time"] == monday_session.open_utc + (300 if outcome == "expired" else 0)
+    if outcome == "filled":
+        assert full[0]["trades"][0]["date"] == str(monday)
+        assert full[0]["trades"][0]["holding_days"] == 1
+        assert full[0]["trades"][0]["initial_stop"] == 98
 
 
 def test_overlap_keeps_atr_and_ignores_current_daily_high_low_close(runner, replay_files):

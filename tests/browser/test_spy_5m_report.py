@@ -21,9 +21,15 @@ def capture_price(page):
                         window.spyPriceLines = [];
                         window.spyPriceLineOptions = [];
                         window.spyNamedSeries = {};
+                        window.spyOrderSeries = new Set();
                         const makeCandle = chart.addCandlestickSeries.bind(chart);
                         const makeLine = chart.addLineSeries.bind(chart);
                         const makeVolume = chart.addHistogramSeries.bind(chart);
+                        const remove = chart.removeSeries.bind(chart);
+                        chart.removeSeries = series => {
+                            window.spyOrderSeries.delete(series);
+                            return remove(series);
+                        };
                         chart.addCandlestickSeries = opts => {
                             const series = makeCandle(opts);
                             const setData = series.setData.bind(series);
@@ -50,6 +56,7 @@ def capture_price(page):
                         chart.addLineSeries = opts => {
                             const series = makeLine(opts);
                             if (opts.title) window.spyNamedSeries[opts.title] = series;
+                            if (opts.title === 'Buy stop') window.spyOrderSeries.add(series);
                             const setData = series.setData.bind(series);
                             series.setData = points => {
                                 window.spyPriceLines.push(points);
@@ -66,12 +73,78 @@ def capture_price(page):
     """)
 
 
+def test_report_draws_buy_stop_through_overnight_fill_or_expiration(page, replay_files, tmp_path):
+    from qqq_viewer.backtest_spy_5m import load_settings, run
+    from qqq_viewer.spy_5m_report import write_report
+    from qqq_viewer.spy_5m_store import sessions
+
+    store, _, config = replay_files
+    friday, monday = date(2025, 11, 28), date(2025, 12, 1)
+    before, after = sessions(friday, monday)
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=102,high=104,close=103 WHERE time=?", (before.open_utc + 1200,))
+        db.execute("UPDATE bars SET open=105,high=106,close=105 WHERE time=?", (after.open_utc,))
+    data = run(load_settings(config), friday, monday)
+    filled, unfilled = data["scenarios"]
+    submitted = next(event for event in filled["events"] if event["action"] == "submitted")
+    unfilled["events"] = [event for event in filled["events"] if event.get("order_id") == submitted["order_id"]
+                          or (event["action"] == "signal" and event["date"] == str(friday))]
+    unfilled["events"][-1] = {**unfilled["events"][-1], "action": "expired", "time": after.open_utc + 300}
+    unfilled["trades"] = []
+    output = tmp_path / "order-lifetime.html"
+    write_report(output, data)
+    capture_price(page)
+    page.goto(output.as_uri())
+    page.locator("#month").select_option("2025-11")
+
+    def order_points():
+        return page.evaluate("[...spyOrderSeries].map(series => series.data())")
+
+    points, = [points for points in order_points() if points[0]["time"] == submitted["time"]]
+    assert points[0] == {"time": submitted["time"], "value": submitted["trigger"]}
+    assert points[-1]["time"] == after.open_utc
+    assert {("Signal", before.open_utc + 600), ("Buy", after.open_utc)} <= {
+        (marker["text"], marker["time"]) for marker in page.evaluate("spyMarkers")
+    }
+    expect(page.locator("#trades tbody tr").first.locator("td").nth(1)).to_contain_text("Nov 28, 2025")
+    page.locator("#scenario").select_option("next_session_open")
+    points, = order_points()
+    assert points[-1]["time"] == after.open_utc + 300
+    assert all(point["value"] == submitted["trigger"] for point in points)
+    assert before.open_utc + 600 in page.evaluate("spyMarkers.filter(m => m.text === 'Signal').map(m => m.time)")
+
+
+def test_report_shows_pending_order_submitted_on_closing_candle(page, replay_files, tmp_path):
+    from qqq_viewer.backtest_spy_5m import load_settings, run
+    from qqq_viewer.spy_5m_report import write_report
+    from qqq_viewer.spy_5m_store import sessions
+
+    store, _, config = replay_files
+    friday = date(2025, 11, 28)
+    session, = sessions(friday, friday)
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET close=open WHERE time=?", (session.open_utc + 900,))
+        db.execute("UPDATE bars SET open=102,high=105 WHERE time=?", (session.close_utc - 300,))
+    data = run(load_settings(config), friday, friday)
+    output = tmp_path / "pending-close.html"
+    write_report(output, data)
+    capture_price(page)
+    page.goto(output.as_uri())
+    expect(page.locator("#pending-entry")).to_contain_text("Dec 1, 2025, 09:35")
+    assert page.evaluate("[...spyOrderSeries][0].data().map(p => p.time)") == [session.close_utc]
+    page.wait_for_function("close => spyPriceChart.timeScale().getVisibleRange()?.to === close", arg=session.close_utc)
+
+
 def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_files, tmp_path):
     from qqq_viewer.backtest_spy_5m import load_settings, run
     from qqq_viewer.spy_5m_report import write_report
+    from qqq_viewer.spy_5m_store import sessions
 
-    _, _, config = replay_files
+    store, _, config = replay_files
     friday = date(2025, 11, 28)
+    monday, = sessions(date(2025, 12, 1), date(2025, 12, 1))
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=106,high=106,close=106 WHERE time=?", (monday.open_utc,))
     with config.open("a", encoding="utf-8") as stream:
         stream.write("[account]\nslippage_floor=0.005\n")
     data = run(load_settings(config), friday, friday)
@@ -85,7 +158,7 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     expect(page.locator("#scenario")).to_have_value("same_day_close")
     expect(page.locator("#month option")).to_have_text(["2025-11"])
     expect(page.locator("#execution")).to_contain_text("$0.005")
-    expect(page.locator("#execution")).to_contain_text("Initial stop uses the entry session's daily Lower")
+    expect(page.locator("#execution")).to_contain_text("Initial stop uses the signal session's daily Lower")
     expect(page.locator("#trades tbody td").nth(4)).to_have_text("98.00")
     expect(page.locator("#trades th").nth(7)).to_have_text("Days")
     expect(page.locator("#trades tbody td").nth(7)).to_have_text("1")
@@ -102,10 +175,11 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     expect(page.locator("#trades tbody td").nth(7)).to_have_text("2")
     expect(page.locator("#ending-equity")).to_have_text(f"${expected_equity[1]:,.2f}")
     expect(page.locator("#trades .positive")).to_have_css("color", "rgb(88, 218, 186)")
-    page.get_by_role("button", name="Show entry").click()
+    page.get_by_role("button", name="Show entry").press("Enter")
     expect(page.locator("#month")).to_have_value("2025-11")
     expect(page.locator("#trade-chart")).to_be_in_viewport()
     expect(page.locator("#chart-legend")).to_contain_text("Upper 101.00")
+    expect(page.locator("#chart-legend")).to_contain_text("Nov 28, 2025")
     expect(page.locator("#chart-legend")).to_contain_text("Vol 10 shares")
     assert "Buy" in page.evaluate("spyMarkers.map(marker => marker.text)")
     trigger = data["scenarios"][1]["trades"][0]["initial_stop"]
@@ -114,7 +188,8 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     page.get_by_role("button", name="Show event").first.click()
     expect(page.locator("#selected-trade")).to_contain_text("Order event")
     expect(page.locator("#trade-chart")).to_be_in_viewport()
-    page.get_by_role("button", name="Show exit").click()
+    page.mouse.move(0, 0)
+    page.get_by_role("button", name="Show exit").press("Enter")
     expect(page.locator("#month")).to_have_value("2025-11")
     expect(page.locator("#chart-legend")).to_contain_text("Dec 1, 2025")
     expect(page.locator("#selected-trade")).to_contain_text("0 of 20 following sessions")
@@ -327,6 +402,31 @@ def test_report_two_months_and_independent_overlays(page, replay_files, tmp_path
     assert page.evaluate("spyCandles[0].time") == december[0]["open_utc"]
     assert page.evaluate("""() => spyPriceLines[spyPriceLineOptions.findLastIndex(
         o => o.title === 'Volume SMA(20)')][0].value""") == december[0]["bars"][0]["volume_sma_20"]
+
+    high_input = page.get_by_role("spinbutton", name="High ATR multiplier")
+    low_input = page.get_by_role("spinbutton", name="Low ATR multiplier")
+    expect(high_input).to_have_value("0.75")
+    expect(low_input).to_have_value("1.25")
+    high_input.fill("0.625")
+    low_input.fill("0")
+    expect(page.locator("#high-atr")).not_to_be_checked()
+    legend = page.locator("#chart-legend")
+    expect(legend).not_to_contain_text("High +")
+    expect(legend).to_contain_text("Low − 0 ATR (buffer 0.00)")
+    page.locator("#high-atr").check()
+    expect(legend).to_contain_text("High + 0.625 ATR (buffer")
+    bar = december[0]["bars"][0]
+    assert page.evaluate("titles => titles.map(title => spyNamedSeries[title].data()[0].value)", titles) == [
+        bar["high"] + 0.625 * bar["atr"], bar["low"],
+    ]
+    high_input.fill("-2")
+    high_input.press("Tab")
+    expect(high_input).to_have_value("0.625")
+    page.locator("#low-atr").uncheck()
+    expect(legend).not_to_contain_text("Low −")
+    page.locator("#scenario").select_option("next_session_open")
+    expect(high_input).to_have_value("0.625")
+    expect(page.locator("#high-atr")).to_be_checked()
 
 
 def test_report_uses_next_calendar_month_across_new_year(page, replay_files, tmp_path):
