@@ -353,16 +353,16 @@ function drawTradeLog() {
         const streak = daily.ema20_streak;
         const row = addRow(body, [trade.date, clockTime(trade.signal_time), clockTime(trade.entry_time),
             price(trade.entry_price), price(trade.initial_stop), timestamp(trade.exit_time), price(trade.exit_price),
-            trade.mfe_r.toFixed(2), trade.mae_r.toFixed(2), money(trade.pnl),
+            trade.holding_days ?? "—", trade.mfe_r.toFixed(2), trade.mae_r.toFixed(2), money(trade.pnl),
             streak > 0 ? `+${streak}` : streak ?? "—", daily.volume_sma20_ratio?.toFixed(2) ?? "—",
             daily.body_atr20_ratio?.toFixed(2) ?? "—", pct(daily.atr20_close_pct),
             "", exitNames[trade.exit_reason], money(trade.commission), money(trade.slippage), count.format(trade.shares),
         ]);
-        const pnl = row.cells[9];
+        const pnl = row.cells[10];
         if (trade.pnl > 0) pnl.classList.add("positive");
         if (trade.pnl < 0) pnl.classList.add("negative");
         row.addEventListener("click", () => jumpTrade(trade, false));
-        const controls = row.cells[14];
+        const controls = row.cells[15];
         controls.append(button("Show entry", () => jumpTrade(trade, false)), " ", button("Show exit", () => jumpTrade(trade, true)));
     }
 }

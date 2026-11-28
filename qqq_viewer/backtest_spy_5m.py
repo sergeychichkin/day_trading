@@ -470,6 +470,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                 else:
                     tail = candidate
                     days.append(tail)
+        session_index = {session.date.isoformat(): i for i, session in enumerate(days)}
         bars = _verified_bars(db, days[0])
         for i, session in enumerate(days):
             following = days[i + 1] if i + 1 < len(days) else None
@@ -531,8 +532,11 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                         if trade.exit_time > session.close_utc:
                             _point(case["equity"], session.close_utc, equity)
                         equity += trade.pnl
-                        case["trades"].append({**asdict(trade), "date": _ny_date(trade.entry_time),
-                                                "exit_date": _ny_date(trade.exit_time),
+                        entry_date = _ny_date(trade.entry_time)
+                        exit_date = _ny_date(trade.exit_time)
+                        case["trades"].append({**asdict(trade), "date": entry_date,
+                                                "exit_date": exit_date,
+                                                "holding_days": session_index[exit_date] - session_index[entry_date] + 1,
                                                 "prior_daily": daily_stats.get(_ny_date(trade.signal_time)),
                                                 "pnl": float(trade.pnl), "equity_after": float(equity)})
                         _point(case["equity"], trade.exit_time, equity)

@@ -87,6 +87,8 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     expect(page.locator("#execution")).to_contain_text("$0.005")
     expect(page.locator("#execution")).to_contain_text("Initial stop uses the entry session's daily Lower")
     expect(page.locator("#trades tbody td").nth(4)).to_have_text("98.00")
+    expect(page.locator("#trades th").nth(7)).to_have_text("Days")
+    expect(page.locator("#trades tbody td").nth(7)).to_have_text("1")
     expect(page.locator("#trades th button").first).to_have_css("cursor", "pointer")
     expect(page.get_by_role("columnheader", name="Bear candle")).to_have_count(0)
     expect(page.locator("#trades .negative")).to_have_css("color", "rgb(255, 138, 138)")
@@ -97,6 +99,7 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
     assert expected_equity[0] != expected_equity[1]
     expect(page.locator("#ending-equity")).to_have_text(f"${expected_equity[0]:,.2f}")
     page.locator("#scenario").select_option("next_session_open")
+    expect(page.locator("#trades tbody td").nth(7)).to_have_text("2")
     expect(page.locator("#ending-equity")).to_have_text(f"${expected_equity[1]:,.2f}")
     expect(page.locator("#trades .positive")).to_have_css("color", "rgb(88, 218, 186)")
     page.get_by_role("button", name="Show entry").click()
@@ -140,20 +143,21 @@ def test_trade_log_sorts_numbers_text_dates_and_missing_values(page, replay_file
     first, last = "2025-11-26", "2025-11-28"
     data = run(load_settings(config), date.fromisoformat(first), date.fromisoformat(last))
     trades = data["scenarios"][0]["trades"]
-    trades[0].update(pnl=100, exit_reason="same_day_close", prior_daily=None)
+    trades[0].update(pnl=100, exit_reason="same_day_close", prior_daily=None, holding_days=10)
     trades[1].update(pnl=20, exit_reason="protective_stop", prior_daily={"ema20_streak": -5})
     output = tmp_path / "sortable.html"
     write_report(output, data)
     page.goto(output.as_uri())
     log = page.locator("#trades")
     assert log.locator("th").all_text_contents()[-4:] == ["Exit reason", "Commission", "Slippage", "Shares"]
-    expect(log.locator("th button")).to_have_count(19)
+    expect(log.locator("th button")).to_have_count(20)
     expect(log.get_by_role("columnheader", name="Daily ATR20 / Close (%)").locator("button br")).to_have_count(1)
     sessions = log.locator("tbody td:first-child")
     expect(sessions).to_have_text([first, last])
 
     for name, ascending, descending in (
         ("Net P&L", [last, first], [first, last]),
+        ("Days", [last, first], [first, last]),
         ("Exit reason", [last, first], [first, last]),
         ("Daily EMA20 streak", [last, first], [last, first]),
         ("Chart", [first, last], [last, first]),
@@ -200,7 +204,7 @@ def test_trade_chart_shows_full_cached_window_outside_replay(page, replay_files,
     capture_price(page)
     page.goto(output.as_uri())
     page.locator("#scenario").select_option("next_session_open")
-    assert page.locator("#trades tbody td").all_text_contents()[10:14] == ["+1", "1.25", "0.50", "1.75%"]
+    assert page.locator("#trades tbody td").all_text_contents()[11:15] == ["+1", "1.25", "0.50", "1.75%"]
     prior, _ = sessions(date(2025, 11, 26), friday)
     for control, left, right in [("Show entry", prior, following[-2]), ("Show exit", sessions(friday, friday)[0], following[-1])]:
         page.get_by_role("button", name=control).click()
@@ -225,7 +229,7 @@ def test_report_handles_no_trades(page, replay_files, tmp_path):
     write_report(output, run(load_settings(config), day, day))
     page.goto(output.as_uri())
     expect(page.locator("#trades")).to_contain_text("No trades for this exit scenario")
-    expect(page.locator("#trades tbody td")).to_have_attribute("colspan", "19")
+    expect(page.locator("#trades tbody td")).to_have_attribute("colspan", "20")
     expect(page.locator("#ending-equity")).to_have_text("$100,000.00")
     expect(page.locator("#scenarios tbody tr").first.get_by_role("cell", name="—", exact=True)).to_have_count(2)
 
@@ -394,7 +398,7 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     assert cells[0] == "2025-11-26"
     assert cells[1:3] == ["09:40", "09:50"]
     assert "Dec 1, 2025" in cells[5]
-    assert cells[7:9] == [f"{trade['mfe_r']:.2f}", f"{trade['mae_r']:.2f}"]
+    assert cells[7:10] == ["3", f"{trade['mfe_r']:.2f}", f"{trade['mae_r']:.2f}"]
     expect(page.locator("#event-month")).to_contain_text("2025-11 through 2025-12")
     rows = page.locator("#orders tbody tr").filter(has_text="Protective stop increase")
     expect(rows).to_have_count(2)

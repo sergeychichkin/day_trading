@@ -84,6 +84,16 @@ def usable_session(session: Session, bars: list[FiveMinuteBar]) -> bool:
     )
 
 
+def by_session(window: list[Session], bars: list[FiveMinuteBar]) -> dict[Session, list[FiveMinuteBar]]:
+    owner = {time: session for session in window for time in expected_times(session)}
+    rows: dict[Session, list[FiveMinuteBar]] = {session: [] for session in window}
+    for bar in bars:
+        session = owner.get(bar.time)
+        if session is not None and (clean := normalize_bar(bar)) is not None:
+            rows[session].append(clean)
+    return rows
+
+
 def _metadata(db, key):
     row = db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
     return row[0] if row else None
@@ -147,6 +157,15 @@ class FiveMinuteStore:
             self._require_unpublished(db)
             db.execute("INSERT INTO metadata VALUES ('target',?) "
                        "ON CONFLICT(key) DO UPDATE SET value=max(value, excluded.value)", (through.isoformat(),))
+
+    def get_metadata(self, key: str) -> str | None:
+        with self._connection() as db:
+            return _metadata(db, key)
+
+    def set_metadata(self, key: str, value: str) -> None:
+        with self._connection(write=True) as db:
+            self._require_unpublished(db)
+            db.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (key, value))
 
     @staticmethod
     def _require_unpublished(db):

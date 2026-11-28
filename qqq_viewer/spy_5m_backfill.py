@@ -14,7 +14,8 @@ from ib_async.wrapper import RequestError
 
 from .sessions import NEW_YORK, Session
 from .spy_5m_store import (
-    DEFAULT_DB, FiveMinuteBar, FiveMinuteStore, completed, expected_times, normalize_bar, usable_session,
+    DEFAULT_DB, FiveMinuteBar, FiveMinuteStore, by_session as _by_session, completed, expected_times, normalize_bar,
+    usable_session,
 )
 from .spy_5m_view import daily_price_pair, price_basis_mismatch
 from .spy_daily import DEFAULT_CACHE
@@ -84,16 +85,6 @@ class SpyHistory(TwsHistory):
         if status == "complete" and not result:
             return "empty", [], "TWS returned no usable five-minute timestamps."
         return status, result, diagnostic
-
-
-def _by_session(window, bars):
-    owner = {time: session for session in window for time in expected_times(session)}
-    rows = {session: [] for session in window}
-    for bar in bars:
-        session = owner.get(bar.time)
-        if session is not None and (clean := normalize_bar(bar)) is not None:
-            rows[session].append(clean)
-    return rows
 
 
 def _probe_window(store, client, window, duration, label):

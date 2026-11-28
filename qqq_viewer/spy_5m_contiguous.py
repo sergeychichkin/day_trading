@@ -8,10 +8,10 @@ from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from pathlib import Path
 
-from .spy_5m_backfill import STOP, SpyHistory, _by_session
-from .spy_5m_snapshot import SQLITE_SIDECARS, read_snapshot
+from .spy_5m_backfill import STOP, SpyHistory
+from .spy_5m_snapshot import read_snapshot, sqlite_paths
 from .spy_5m_store import (
-    APPLICATION_ID, BAR_FIELDS, DEFAULT_DB, FiveMinuteBar, FiveMinuteStore, completed,
+    APPLICATION_ID, BAR_FIELDS, DEFAULT_DB, FiveMinuteBar, FiveMinuteStore, by_session, completed,
     expected_times, normalize_bar, publication, sessions, usable_session,
 )
 
@@ -19,7 +19,7 @@ DEFAULT_STAGING = Path("data/spy_5m_contiguous_audit.sqlite3")
 DEFAULT_FLOOR = date(2004, 1, 23)
 
 
-def _identity(db, schema):
+def identity(db, schema: str = "main") -> tuple[int, str]:
     info = dict(db.execute(f"SELECT key, value FROM {schema}.metadata WHERE key IN ('contract', 'volume_unit')"))
     con_id = info.get("contract", "")
     unit = info.get("volume_unit")
@@ -28,7 +28,10 @@ def _identity(db, schema):
     return int(con_id), unit
 
 
-def _validate_window(db, window, *, schema="main"):
+_identity = identity
+
+
+def validate_window(db, window, *, schema="main"):
     first, last = window[0].date.isoformat(), window[-1].date.isoformat()
     params = first, last
     conflict = db.execute(f"SELECT date FROM {schema}.conflicts WHERE date BETWEEN ? AND ? LIMIT 1",
@@ -60,6 +63,22 @@ def _validate_window(db, window, *, schema="main"):
     return expected_total
 
 
+_validate_window = validate_window
+
+
+def copy_window(target: sqlite3.Connection, schema: str, start: str, end: str) -> None:
+    params = (start, end)
+    for table, fields in (
+        ("bars", BAR_FIELDS + ",date"),
+        ("sessions", "date,completed,verified"),
+        ("attempts", "date,status,diagnostic,accepted,recorded_at"),
+    ):
+        target.execute(
+            f"INSERT INTO {table} ({fields}) SELECT {fields} FROM {schema}.{table} WHERE date BETWEEN ? AND ?",
+            params,
+        )
+
+
 def verify_published(store: FiveMinuteStore, through: date | None = None) -> dict:
     if not store.path.is_file():
         raise ValueError("No published SPY five-minute cache to verify.")
@@ -74,25 +93,28 @@ def verify_published(store: FiveMinuteStore, through: date | None = None) -> dic
         window = sessions(start, cutoff)
         if not window or window[-1].date != cutoff or window[0].date != start:
             raise ValueError("Both verification bounds must be NYSE trading sessions.")
-        _identity(db, "main")
+        identity(db, "main")
         edge = db.execute("SELECT MIN(date), MAX(date) FROM bars").fetchone()
         if edge != bounds:
             raise ValueError("Cached SPY rows lie outside the published range or do not reach its endpoints.")
         if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise ValueError("SQLite integrity check failed for the SPY viewer cache.")
-        bars = _validate_window(db, window)
+        bars = validate_window(db, window)
     return {"start": start.isoformat(), "through": cutoff.isoformat(), "sessions": len(window), "bars": bars}
 
 
-def _require_distinct(left: Path, right: Path):
-    def database_files(path):
-        path = path.resolve()
-        return [path, *(Path(str(path) + suffix).resolve() for suffix in SQLITE_SIDECARS)]
+def require_distinct(*paths: Path):
+    seen = []
+    for path in paths:
+        files = sqlite_paths(path)
+        for candidate in files:
+            for existing in seen:
+                if candidate == existing or (candidate.exists() and existing.exists() and candidate.samefile(existing)):
+                    raise ValueError("SPY cache and auxiliary files must be distinct paths without shared sidecars.")
+        seen.extend(files)
 
-    for first in database_files(left):
-        for second in database_files(right):
-            if first == second or (first.exists() and second.exists() and first.samefile(second)):
-                raise ValueError("SPY viewer and staging caches must be different files with separate sidecars.")
+
+_require_distinct = require_distinct
 
 
 def publish(store: FiveMinuteStore, stage: FiveMinuteStore, window, *, previous, requested: date) -> None:
@@ -119,13 +141,7 @@ def publish(store: FiveMinuteStore, stage: FiveMinuteStore, window, *, previous,
             # Attaching, validating, and copying in this transaction pins one source snapshot.
             _validate_window(db, window, schema="staged")
             params = start.isoformat(), end.isoformat()
-            for table, fields in (
-                ("bars", BAR_FIELDS + ",date"),
-                ("sessions", "date,completed,verified"),
-                ("attempts", "date,status,diagnostic,accepted,recorded_at"),
-            ):
-                db.execute(f"INSERT INTO {table} ({fields}) SELECT {fields} FROM staged.{table} "
-                           "WHERE date BETWEEN ? AND ?", params)
+            copy_window(db, "staged", *params)
             db.executemany("INSERT OR REPLACE INTO metadata VALUES (?,?)", [
                 ("verified_contiguous_start", previous[0] if previous else params[0]),
                 ("verified_contiguous_end", params[1]), ("target", params[1]),
@@ -141,7 +157,7 @@ def _capture_month(stage, history, month, window, *, newest_first):
         status, rows, detail = history.request(pending, "1 M")
         if status in STOP:
             raise ValueError(f"{month}: {status}; {detail}")
-        for session, bars in _by_session(pending, rows).items():
+        for session, bars in by_session(pending, rows).items():
             stage.record(session, status, bars, detail)
     pending = set(stage.pending(window))
     by_date = {row["date"]: row for row in stage.read_month(month)["sessions"]}
@@ -151,7 +167,7 @@ def _capture_month(stage, history, month, window, *, newest_first):
             status, bars, detail = history.request([session], "1 D")
             if status in STOP or status == "timeout":
                 raise ValueError(f"{key}: {status}; {detail}")
-            stage.record(session, status, _by_session([session], bars)[session], detail)
+            stage.record(session, status, by_session([session], bars)[session], detail)
             row = next(row for row in stage.read_month(month)["sessions"] if row["date"] == key)
         else:
             row = by_date[key]
