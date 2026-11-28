@@ -148,3 +148,37 @@ def test_stops_at_unfillable_gap_and_guards_contract_and_backup(tmp_path):
         )
     assert existing_backup.read_bytes() == b"keep-me"
     assert spy_5m_contiguous.verify_published(FiveMinuteStore(source, read_only=True))["start"] == "2025-11-26"
+
+
+def test_promote_aborts_when_gap_is_unfillable_and_guards_backup_path(tmp_path):
+    from qqq_viewer.spy_5m_extend import extend_spy_5m
+
+    source = tmp_path / "spy_5m.sqlite3"
+    _seed_published_tws(source, date(2025, 11, 26), date(2025, 11, 28))
+    scid = tmp_path / "SPY.scid"
+    pre = sessions(date(2025, 11, 21), date(2025, 11, 25))
+    _write_1m_scid_for_sessions(scid, pre, skip_first_bar_on={date(2025, 11, 24)})
+
+    missing_backup = tmp_path / "unused_backup.sqlite3"
+    with pytest.raises(ValueError, match="Blocked at 2025-11-24"):
+        extend_spy_5m(
+            scid, source, tmp_path / "out_gap_promote.sqlite3", tmp_path / "stage_gap_promote.sqlite3",
+            floor=date(2025, 11, 21),
+            history_factory=lambda: _FakeTws(empty_dates={"2025-11-24"}),
+            backup_path=missing_backup,
+            promote=True,
+        )
+    assert not missing_backup.exists()
+    assert spy_5m_contiguous.verify_published(FiveMinuteStore(source, read_only=True))["start"] == "2025-11-26"
+
+    colliding_out = tmp_path / "colliding.sqlite3"
+    with pytest.raises(ValueError, match="different files"):
+        extend_spy_5m(
+            scid, source, colliding_out, tmp_path / "stage_col.sqlite3",
+            floor=date(2025, 11, 21),
+            history_factory=lambda: _FakeTws(),
+            backup_path=colliding_out,
+            promote=True,
+        )
+    assert not colliding_out.exists()
+    assert spy_5m_contiguous.verify_published(FiveMinuteStore(source, read_only=True))["start"] == "2025-11-26"

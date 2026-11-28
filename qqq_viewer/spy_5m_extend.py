@@ -1,6 +1,7 @@
 """Extend the published SPY five-minute cache backward using Sierra .scid and TWS."""
 
 import argparse
+import errno
 import os
 import shutil
 import sqlite3
@@ -137,13 +138,20 @@ def _backup_source(source_db: Path, backup_path: Path) -> None:
 def _promote_database(out_db: Path, source_db: Path, backup_path: Path | None) -> None:
     if backup_path is not None:
         _backup_source(source_db, backup_path)
-    for suffix in SQLITE_SIDECARS:
-        Path(str(source_db) + suffix).unlink(missing_ok=True)
     try:
         os.replace(out_db, source_db)
-    except OSError:
-        shutil.copyfile(out_db, source_db)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        staged = source_db.with_name(f"{source_db.name}.promoting")
+        try:
+            shutil.copyfile(out_db, staged)
+            os.replace(staged, source_db)
+        finally:
+            staged.unlink(missing_ok=True)
         _unlink_with_sidecars(out_db)
+    for suffix in SQLITE_SIDECARS:
+        Path(str(source_db) + suffix).unlink(missing_ok=True)
     verify_published(FiveMinuteStore(source_db, read_only=True))
 
 
@@ -162,8 +170,11 @@ def extend_spy_5m(
     _require_distinct(source_db, out_db)
     _require_distinct(source_db, staging_db)
     _require_distinct(out_db, staging_db)
-    if promote and backup_path is not None and backup_path.resolve().exists():
-        raise ValueError(f"Refusing to overwrite existing backup: {backup_path}")
+    if promote and backup_path is not None:
+        for other in (source_db, out_db, staging_db):
+            _require_distinct(backup_path, other)
+        if any(p.exists() or p.is_symlink() for p in (backup_path, *(Path(str(backup_path) + s) for s in SQLITE_SIDECARS))):
+            raise ValueError(f"Refusing to overwrite existing backup: {backup_path}")
     if not scid_path.is_file():
         raise ValueError(f"Sierra SCID file not found: {scid_path}")
 
@@ -208,6 +219,8 @@ def extend_spy_5m(
     verified = verify_published(FiveMinuteStore(out_db, read_only=True))
 
     if promote:
+        if blocked is not None:
+            raise ValueError(f"Blocked at {blocked.isoformat()}; refusing to promote incomplete extension over {source_db}.")
         _promote_database(out_db, source_db, backup_path)
 
     return {
