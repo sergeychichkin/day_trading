@@ -3,13 +3,13 @@ from datetime import date, time
 
 import pytest
 
-from qqq_viewer.spy_5m_store import FiveMinuteBar, expected_times, sessions
+from equity_backtest.history_5m import FiveMinuteBar, expected_times, sessions
 
 
 @pytest.fixture
 def replay():
-    from qqq_viewer import spy_5m_replay
-    return spy_5m_replay
+    from equity_backtest import replay_5m
+    return replay_5m
 
 
 def tape(overrides=None, day=date(2025, 11, 26)):

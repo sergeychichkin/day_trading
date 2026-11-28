@@ -1,122 +1,25 @@
+"""Serve the local SPY daily chart."""
+
 import argparse
 import json
-import re
-import sqlite3
-from collections import deque
-from dataclasses import asdict
-from datetime import date, datetime, time, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .sessions import NEW_YORK, START_DATE, sessions
-from . import spy_5m_view
-from .spy_5m_store import DEFAULT_DB as SPY_5M_DB, FiveMinuteStore
+from equity_backtest.report_5m import CHART_LIBRARY
+
 from .spy_daily import DEFAULT_CACHE as SPY_CACHE
-from .store import BAR_COLUMNS, Bar, Store
 
 STATIC = Path(__file__).with_name("static")
 ASSETS = {
-    "/": ("index.html", "text/html; charset=utf-8"),
-    "/spy": ("spy.html", "text/html; charset=utf-8"),
-    "/spy/5m": ("spy-5m.html", "text/html; charset=utf-8"),
-    "/static/spy.js": ("spy.js", "application/javascript; charset=utf-8"),
-    "/static/spy-5m.js": ("spy-5m.js", "application/javascript; charset=utf-8"),
-    "/static/style.css": ("style.css", "text/css; charset=utf-8"),
-    "/static/chart.js": ("chart.js", "application/javascript; charset=utf-8"),
-    "/static/vendor/lightweight-charts.js": ("vendor/lightweight-charts.js", "application/javascript"),
+    "/spy": (STATIC / "spy.html", "text/html; charset=utf-8"),
+    "/static/spy.js": (STATIC / "spy.js", "application/javascript; charset=utf-8"),
+    "/static/style.css": (STATIC / "style.css", "text/css; charset=utf-8"),
+    "/static/vendor/lightweight-charts.js": (CHART_LIBRARY, "application/javascript"),
 }
-MONTH = re.compile(r"\d{4}-(?:0[1-9]|1[0-2])", flags=re.ASCII)
 
 
-def _bar_date(epoch: int) -> date:
-    return datetime.fromtimestamp(epoch, NEW_YORK).date()
-
-
-def _next_month(month: date) -> date:
-    return (month.replace(day=28) + timedelta(days=4)).replace(day=1)
-
-
-def _latest_date(db: sqlite3.Connection) -> date | None:
-    value = db.execute("SELECT MAX(time) FROM bars").fetchone()[0]
-    return _bar_date(value) if value is not None else None
-
-
-def month_index(store: Store) -> dict:
-    if not store.path.is_file():
-        return {"months": [], "default_month": None}
-    with store.reader() as db:
-        latest = _latest_date(db)
-        cutoff = store.target_end_date(db) or latest
-    months = []
-    month = START_DATE
-    while cutoff and month <= cutoff:
-        months.append(month.strftime("%Y-%m"))
-        month = _next_month(month)
-    return {"months": months, "default_month": latest.strftime("%Y-%m") if latest else None}
-
-
-def month_payload(store: Store, month: str) -> dict:
-    if not MONTH.fullmatch(month) or not "2020-01" <= month < "9999-12":
-        raise ValueError("Enter a month from January 2020 onward.")
-    first = date.fromisoformat(month + "-01")
-    following = _next_month(first)
-    start = int(datetime.combine(first, time.min, NEW_YORK).timestamp())
-    end = int(datetime.combine(following, time.min, NEW_YORK).timestamp())
-    rows = []
-    expected = unverified = 0
-    conflict_times = []
-    month_sessions = []
-    unit = None
-    if store.path.is_file():
-        with store.reader() as db:
-            target = store.target_end_date(db) or _latest_date(db)
-            if target and first <= target:
-                month_sessions = sessions(first, min(target, following - timedelta(days=1)))
-            expected = sum(len(session.minutes) for session in month_sessions)
-            unverified = sum(not store.has_completed_response(db, session) for session in month_sessions)
-            warmup = db.execute("SELECT volume FROM bars WHERE time<? ORDER BY time DESC LIMIT 19", (start,))
-            window = deque((r[0] for r in reversed(warmup.fetchall())), maxlen=20)
-            session_date = None
-            session_volume = weighted_price = 0.0
-            for row in db.execute(
-                f"SELECT {BAR_COLUMNS} FROM bars WHERE time>=? AND time<? ORDER BY time", (start, end),
-            ):
-                bar = Bar(*row)
-                bar_date = _bar_date(bar.time)
-                if bar_date != session_date:
-                    session_date = bar_date
-                    session_volume = weighted_price = 0.0
-                typical_price = (bar.high + bar.low + bar.close) / 3
-                session_volume += bar.volume
-                weighted_price += typical_price * bar.volume
-                window.append(bar.volume)
-                rows.append(asdict(bar) | {
-                    "volume_sma_20": sum(window) / 20 if len(window) == 20 else None,
-                    "session_vwap": weighted_price / session_volume if session_volume else None,
-                })
-            conflict_times = [row[0] for row in db.execute(
-                "SELECT DISTINCT time FROM conflicts WHERE time>=? AND time<? ORDER BY time", (start, end),
-            )]
-            volume_unit = db.execute("SELECT value FROM metadata WHERE key='volume_unit'").fetchone()
-            unit = volume_unit[0] if volume_unit else None
-    missing = max(0, expected - len(rows))
-    coverage_status = "empty" if not rows else "incomplete" if missing or unverified else "complete"
-    return {
-        "month": month, "bars": rows, "conflict_times": conflict_times,
-        "sessions": [{"date": s.date.isoformat(), "open_utc": s.open_utc, "close_utc": s.close_utc}
-                     for s in month_sessions],
-        "coverage": {"expected": expected, "received": len(rows), "missing": missing,
-                     "conflicting": len(conflict_times), "unverified_sessions": unverified, "status": coverage_status},
-        "volume_unit": unit,
-    }
-
-
-def make_server(db_path: Path, port: int, *, spy_cache: Path = SPY_CACHE,
-                spy_5m_db: Path = SPY_5M_DB) -> ThreadingHTTPServer:
-    store = Store(db_path, read_only=True)
-    spy_intraday = FiveMinuteStore(spy_5m_db, read_only=True)
-
+def make_server(port: int, *, spy_cache: Path = SPY_CACHE) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def respond(self, status: int, content_type: str, body: bytes):
             self.send_response(status)
@@ -137,18 +40,14 @@ def make_server(db_path: Path, port: int, *, spy_cache: Path = SPY_CACHE,
         def do_GET(self):
             path = urlsplit(self.path).path
             try:
-                if path in ASSETS:
-                    name, content_type = ASSETS[path]
-                    self.respond(200, content_type, (STATIC / name).read_bytes())
-                elif path == "/api/months":
-                    self.json(200, month_index(store))
-                elif path.startswith("/api/month/"):
-                    self.json(200, month_payload(store, path.removeprefix("/api/month/")))
-                elif path == "/api/spy/5m/months":
-                    self.json(200, spy_5m_view.month_index(spy_intraday))
-                elif path.startswith("/api/spy/5m/month/"):
-                    month = path.removeprefix("/api/spy/5m/month/")
-                    self.json(200, spy_5m_view.month_payload(spy_intraday, spy_cache, month))
+                if path == "/":
+                    self.send_response(302)
+                    self.send_header("Location", "/spy")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                elif path in ASSETS:
+                    asset, content_type = ASSETS[path]
+                    self.respond(200, content_type, asset.read_bytes())
                 elif path == "/api/spy/daily":
                     try:
                         snapshot = spy_cache.read_bytes()
@@ -160,7 +59,7 @@ def make_server(db_path: Path, port: int, *, spy_cache: Path = SPY_CACHE,
                     self.json(404, {"error": "Page not found."})
             except ValueError as exc:
                 self.json(400, {"error": str(exc)})
-            except (OSError, sqlite3.Error) as exc:
+            except OSError as exc:
                 self.log_error("%s", exc)
                 self.json(503, {"error": "The local viewer could not read its cache or chart assets."})
 
@@ -168,16 +67,12 @@ def make_server(db_path: Path, port: int, *, spy_cache: Path = SPY_CACHE,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serve the local QQQ and SPY chart viewers.")
-    parser.add_argument("--db", type=Path, default=Path("data/qqq.sqlite3"))
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spy-cache", type=Path, default=SPY_CACHE)
-    parser.add_argument("--spy-5m-db", type=Path, default=SPY_5M_DB)
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-    with make_server(args.db, args.port, spy_cache=args.spy_cache, spy_5m_db=args.spy_5m_db) as server:
-        print(f"QQQ viewer at http://127.0.0.1:{server.server_port}/", flush=True)
-        print(f"SPY viewer at http://127.0.0.1:{server.server_port}/spy", flush=True)
-        print(f"SPY five-minute viewer at http://127.0.0.1:{server.server_port}/spy/5m", flush=True)
+    with make_server(args.port, spy_cache=args.spy_cache) as server:
+        print(f"SPY daily viewer at http://127.0.0.1:{server.server_port}/spy", flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:

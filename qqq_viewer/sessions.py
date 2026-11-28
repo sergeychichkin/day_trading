@@ -1,23 +1,10 @@
-﻿from dataclasses import dataclass
-from datetime import date, datetime
+﻿from datetime import date, datetime
 from functools import lru_cache
-from zoneinfo import ZoneInfo
 
 import pandas_market_calendars as markets
 
-NEW_YORK = ZoneInfo("America/New_York")
+from equity_backtest.market_time import NEW_YORK, Session
 START_DATE = date(2020, 1, 1)
-
-
-@dataclass(frozen=True)
-class Session:
-    date: date
-    open_utc: int
-    close_utc: int
-
-    @property
-    def minutes(self) -> range:
-        return range(self.open_utc, self.close_utc, 60)
 
 
 @lru_cache(maxsize=16)

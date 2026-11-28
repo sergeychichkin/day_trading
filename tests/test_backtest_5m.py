@@ -7,16 +7,16 @@ from pathlib import Path
 
 import pytest
 
-from qqq_viewer.spy_5m_store import FiveMinuteStore, sessions
-from tests.test_spy_5m_replay import tape
+from equity_backtest.history_5m import FiveMinuteStore, sessions
+from tests.test_replay_5m import tape
 
 DAILY_ID = {"schema": "yahoo-daily-v1", "ticker": "SPY", "source": "Yahoo Finance"}
 
 
 @pytest.fixture
 def runner():
-    from qqq_viewer import backtest_spy_5m
-    return backtest_spy_5m
+    from equity_backtest import backtest_5m
+    return backtest_5m
 
 
 @pytest.fixture
@@ -42,10 +42,53 @@ def replay_files(tmp_path):
     return store, daily, config
 
 
+@pytest.mark.parametrize(("ticker", "contract_id"), [("AAPL", 101001), ("IWM", 101002)])
+def test_generic_cli_replays_verified_stock_and_etf(replay_files, ticker, contract_id, tmp_path):
+    import subprocess
+    import sys
+
+    from equity_backtest import backtest_5m as cli
+
+    store, daily, config = replay_files
+    with store._connection(write=True) as db:
+        db.executemany("INSERT OR REPLACE INTO metadata VALUES (?,?)", (("ticker", ticker), ("contract", str(contract_id))))
+    daily.write_text(json.dumps({**json.loads(daily.read_bytes()), "ticker": ticker}), encoding="utf-8")
+    config.write_text(config.read_text().replace('ticker = "SPY"', f'ticker = "{ticker}"\ncontract_id = {contract_id}'))
+    settings = cli.load_settings(config)
+    data = cli.run(settings)
+    assert data["ticker"] == ticker and data["scenarios"][0]["trades"]
+    assert cli.output_path(None, settings, data["coverage"]).name.startswith(f"{ticker}_5m_entry1_")
+    output = tmp_path / f"{ticker}.html"
+    command = [sys.executable, "-m", "equity_backtest.backtest_5m", "--config", str(config), "--output", str(output)]
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
+    assert result.returncode == 0, result.stderr
+    assert f"<title>{ticker} Five-Minute Entry 1 Backtest</title>" in output.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("ticker", "contract_id", "cache_ticker", "cache_contract", "daily_ticker", "volume_unit", "message"), [
+    ("IWM", 101002, "IWM", "1", "IWM", "shares", "contract"),
+    ("IWM", 101002, None, "101002", "IWM", "shares", "ticker"),
+    ("IWM", 101002, "SPY", "101002", "IWM", "shares", "ticker"),
+    ("IWM", 101002, "IWM", "101002", "SPY", "shares", "daily snapshot identity"),
+    ("IWM", 101002, "IWM", "101002", "IWM", "unknown", "volume unit"),
+    ("SPY", 756733, "IWM", "756733", "SPY", "shares", "ticker"),
+])
+def test_rejects_mismatched_cache_identity(runner, replay_files, ticker, contract_id, cache_ticker,
+                                           cache_contract, daily_ticker, volume_unit, message):
+    store, daily, config = replay_files
+    with store._connection(write=True) as db:
+        values = (("ticker", cache_ticker), ("contract", cache_contract), ("volume_unit", volume_unit))
+        db.executemany("INSERT OR REPLACE INTO metadata VALUES (?,?)", ((key, val) for key, val in values if val is not None))
+    daily.write_text(json.dumps({**json.loads(daily.read_bytes()), "ticker": daily_ticker}), encoding="utf-8")
+    config.write_text(config.read_text().replace('ticker = "SPY"', f'ticker = "{ticker}"\ncontract_id = {contract_id}'))
+    with pytest.raises(ValueError, match=message):
+        runner.run(runner.load_settings(config))
+
+
 def test_config_defaults_and_validation(runner, tmp_path):
     cfg = runner.load_settings(Path("config/SPY.toml"))
     assert (cfg.entry.entry1_start_time, cfg.entry.entry1_end_time) == (time(9, 30), time(9, 40))
-    assert cfg.entry.entry_atr_buffer == 0.25
+    assert runner.EntrySettings().entry_atr_buffer == 0.25
     assert (cfg.account.starting_balance, cfg.account.risk_pct, cfg.account.cash_cap) == (100000, 1, 1)
     assert cfg.trailing_stop and not (cfg.same_day_close or cfg.next_session_open)
     assert (cfg.chart.high_atr_multiplier, cfg.chart.low_atr_multiplier) == (0.25, 0.5)
@@ -62,9 +105,16 @@ def test_config_defaults_and_validation(runner, tmp_path):
         path.write_text('ticker="SPY"\nintraday_cache="cache.db"\ndaily_cache="daily.json"\n' + custom, encoding="utf-8")
         with pytest.raises(ValueError, match=match):
             runner.load_settings(path)
-    path.write_text('ticker="QQQ"\nintraday_cache="cache.db"\ndaily_cache="daily.json"\n', encoding="utf-8")
-    with pytest.raises(ValueError, match="SPY"):
+    base = 'intraday_cache="cache.db"\ndaily_cache="daily.json"\n'
+    for key in ('', '\ncontract_id=true', '\ncontract_id=0', '\ncontract_id="5"', '\ncontract_id=756733'):
+        path.write_text(base + f'ticker="IWM"{key}', encoding="utf-8")
+        with pytest.raises(ValueError, match="contract_id"):
+            runner.load_settings(path)
+    path.write_text(base + 'ticker="BAD/NAME"\ncontract_id=123', encoding="utf-8")
+    with pytest.raises(ValueError, match="ticker"):
         runner.load_settings(path)
+    path.write_text(base + 'ticker="BRK.B"\ncontract_id=123', encoding="utf-8")
+    assert runner.load_settings(path).ticker == "BRK.B"
 
 
 def test_legacy_order_lifetime_loads_with_notice(runner, replay_files):
@@ -278,7 +328,7 @@ def test_reversed_publication_is_reported_as_invalid(runner, replay_files):
     store, _, config = replay_files
     with store._connection(write=True) as db:
         db.execute("UPDATE metadata SET value='2025-12-02' WHERE key='verified_contiguous_start'")
-    with pytest.raises(ValueError, match="Invalid published SPY coverage bounds"):
+    with pytest.raises(ValueError, match="Invalid published five-minute coverage bounds"):
         runner.run(runner.load_settings(config))
 
 
@@ -342,7 +392,7 @@ def test_exit_modes_compound_independently_and_use_only_verified_next_open(runne
         with pytest.raises(ValueError, match="input"):
             runner.output_path(bad, settings, result["coverage"])
     assert runner.output_path(None, settings, result["coverage"]).name == "SPY_5m_entry1_2025-11-26_2025-11-28.html"
-    with pytest.raises(ValueError, match="SPY"):
+    with pytest.raises(ValueError, match="contract_id"):
         runner.run(replace(settings, ticker="QQQ"))
 
 
@@ -736,7 +786,7 @@ def test_invalid_published_endpoint_is_not_rounded_to_a_trading_day(runner, repl
 
 @pytest.mark.skipif(os.name != "nt", reason="Alternate data streams are a Windows path feature")
 def test_windows_stream_names_cannot_write_to_input(runner, replay_files):
-    from qqq_viewer.spy_5m_report import write_report
+    from equity_backtest.report_5m import write_report
 
     store, _, config = replay_files
     stream = store.path.with_name(store.path.name + ":report.html")

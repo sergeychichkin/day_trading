@@ -78,7 +78,7 @@ def test_store_rejects_qqq_or_incompatible_metadata(intraday, tmp_path):
     qqq = tmp_path / "qqq.db"
     Store(qqq).require_volume_unit("shares")
     before = sha256(qqq.read_bytes()).digest()
-    with pytest.raises(ValueError, match="SPY"):
+    with pytest.raises(ValueError, match="five-minute cache"):
         intraday.FiveMinuteStore(qqq)
     assert sha256(qqq.read_bytes()).digest() == before
     store = intraday.FiveMinuteStore(tmp_path / "spy.db")

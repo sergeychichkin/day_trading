@@ -61,7 +61,7 @@ def test_build_publishes_only_the_suffix_and_verifies_fixed_cutoff(workflow, sto
 def test_fresh_publisher_output_is_accepted_by_offline_replay(workflow, stores, tmp_path):
     import json
 
-    from qqq_viewer.backtest_spy_5m import load_settings, run as replay
+    from equity_backtest.backtest_5m import load_settings, run as replay
 
     main, _ = stores
     run(workflow, stores, FakeHistory(), "2025-11-28")

@@ -15,7 +15,7 @@ Reviewed commits `2e79323..7285a58` on `main` against baseline `08691bf`. Four f
 ### G1. High — `README.md` reports stale TWS-only coverage, breaks the Nov 24, 2026 reproduction, and links a moved anchor
 - [README.md#L128-L134](../../README.md#L128-L134) still states published coverage is `December 24, 2013 through November 24, 2026; 3,249 sessions and 252,450 bars` and claims session VWAP uses `"IBKR's five-minute weighted prices and volume"` (omitting Sierra's `1,409` typical-price `wap` sessions and `spy_5m_extend`).
 - [README.md#L211-L232](../../README.md#L211-L232) instructs running `--config config/SPY.toml --start 2013-12-24 --end 2026-11-24` and checking `intraday_sha256` against `37d8a062...` (`252,450` bars). Because `config/SPY.toml` points to `data/spy_5m.sqlite3` (`2008-05-05`), `backtest_spy_5m.run` hashes and warms up ATR(20), Volume SMA(20), and prior-day lookups across all `362,856` bars instead, changing the fingerprint and initial indicators unless pointed at `data/spy_5m_tws_2013_2026.sqlite3`.
-- [README.md#L205](../../README.md#L205) links `[dated TWS publisher command](docs/spy-5m-coverage.md#published-uninterrupted-range)`, but inserting the Sierra section at [docs/spy-5m-coverage.md#L39](../spy-5m-coverage.md#L39) moved those commands below the new heading.
+- The reviewed README linked the dated TWS publisher command under the published range heading. Inserting the Sierra section moved those commands below the new heading. [SPY coverage record](../spy-5m-coverage.md)
 
 ### G2. High — `EGM.md` and `qqq_viewer/EGM.md` omit the Sierra modules and state TWS-only invariants
 - [EGM.md#L42-L54](../../EGM.md#L42-L54) describes SPY five-minute acquisition solely as forward TWS staging/refreshing.

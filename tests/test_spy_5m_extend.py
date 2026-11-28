@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from qqq_viewer import backtest_spy_5m, spy_5m_contiguous, spy_5m_store, spy_5m_view
+from equity_backtest import backtest_5m
+from qqq_viewer import spy_5m_contiguous, spy_5m_store
 from qqq_viewer.spy_5m_snapshot import read_snapshot
 from qqq_viewer.spy_5m_store import FiveMinuteStore, expected_times, sessions
 from qqq_viewer.tws import ContractIdentity
@@ -281,15 +282,10 @@ def test_cli_main_and_downstream_consumers(tmp_path, monkeypatch):
     ])
     assert spy_5m_extend.main() == 0
 
-    # Downstream 1: spy_5m_view
-    payload = spy_5m_view.month_payload(FiveMinuteStore(source, read_only=True), daily, "2025-11")
-    assert payload["published_start"] == "2025-11-21"
-    assert len(payload["sessions"]) == 5
-
-    # Downstream 2: backtest_spy_5m
+    # The published cache also feeds the five-minute replay.
     cfg_path = tmp_path / "SPY.toml"
     cfg_path.write_text(f'ticker="SPY"\nintraday_cache="{source.name}"\ndaily_cache="{daily.name}"\n', encoding="utf-8")
-    bt = backtest_spy_5m.run(backtest_spy_5m.load_settings(cfg_path))
+    bt = backtest_5m.run(backtest_5m.load_settings(cfg_path))
     assert (bt["coverage"]["start"], bt["coverage"]["end"]) == ("2025-11-21", "2025-11-28")
 
     # Downstream 3: spy_5m_contiguous tail refresh onto 2025-12-01

@@ -1,144 +1,35 @@
-# QQQ opening-session viewer
+# Five-minute equity backtester
 
-Browse Interactive Brokers one-minute QQQ candles for the US regular session from January 2020 onward. The month picker opens the first available trading day's 09:30–11:30 New York time window. Drag the chart to see later bars and adjacent sessions. Each session open has a vertical divider, and the crosshair legend shows the selected minute's OHLC and volume. The blue line is the 20-bar volume SMA, which uses the previous session's bars at the open. The purple VWAP estimate starts fresh each regular session and weights each minute's average of high, low, and close by its volume.
+Run Entry 1 and its exits against verified local five-minute and daily data for a US-listed stock or ETF. Open the generated standalone HTML for the chart, executed trades, and order audit.
 
 ## Setup on Windows
 
-Use Python 3.13 with TWS open and connected to an account with access to QQQ historical data. In Global Configuration → API → Settings, confirm socket access, the local port, and the US-stock volume unit. The local installation used port 7497 and volume in shares. The acquisition client is the pinned ib_async TWS client and only sends contract and historical data requests. [IBKR historical bar documentation](https://www.interactivebrokers.com/docs/tws-api/doc/md/historical-bars)
+Use Python 3.13 and run these commands from the repository root.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-## Acquire or refresh history
+## Run the replay
 
-The one-day probe verifies the January 2, 2020 regular session. The full run resumes from the existing cache and targets the most recent completed regular session at startup. Use the same confirmed volume unit when refreshing. Before fetching missing data, the downloader compares the January probe against the cached reference to catch an upstream unit change. The default SQLite file is data/qqq.sqlite3.
-
-```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.backfill --port 7497 --volume-unit shares --probe
-.\.venv\Scripts\python.exe -m qqq_viewer.backfill --port 7497 --volume-unit shares
-```
-
-Full runs request at most one calendar month per block and retry incomplete sessions individually. The terminal reports the observed New York range, missing minutes, unverified sessions, and conflicting minutes. The cache preserves provider OHLCV and a request ledger. When responses for the same minute disagree, the first accepted bar remains on the chart and the chart marks the affected candle.
-
-## Browse the cache
+The included [SPY config](config/SPY.toml) uses the installed SPY caches. With no dates supplied, the replay uses the full published range. The chart and report work offline. Pass an unused `--output` path to keep a separate report. Omitting `--output` atomically replaces the default `output/<TICKER>_5m_entry1_<start>_<end>.html`.
 
 ```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.server --port 8765
+.\.venv\Scripts\python.exe -m equity_backtest.backtest_5m --config config/SPY.toml
+.\.venv\Scripts\python.exe -m equity_backtest.backtest_5m --config config/SPY.toml --start 2020-01-01 --end 2020-12-31 --output output/SPY_5m_2020.html
 ```
 
-Open [the local QQQ viewer](http://127.0.0.1:8765/). The viewer can run as the backfill progresses and works after TWS is closed. Reload the page to refresh month availability. The coverage line shows received and expected regular-session minutes for the selected month and flags gaps and conflicts. Scheduled closures and early closes use the exchange calendar. Overnight and weekend gaps are compressed on the chart.
+For another instrument, copy the SPY TOML to a new file next to it. Replace the four fields below with the ticker, its verified contract ID, and its two local cache paths. `123456` is an example placeholder. The CLI checks both input identities and verifies the intraday coverage before using the selected sessions. See the [local input contract](docs/five-minute-inputs.md).
 
-## SPY daily viewer
-
-Install the project dependencies, download the data, then start the same local server. SPY does not require TWS.
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\python.exe -m qqq_viewer.spy_daily
-.\.venv\Scripts\python.exe -m qqq_viewer.server --port 8765
+```toml
+ticker = "IWM"
+contract_id = 123456
+intraday_cache = "../data/iwm_5m.sqlite3"
+daily_cache = "../data/iwm_daily.json"
 ```
 
-Open [the SPY daily viewer](http://127.0.0.1:8765/spy). The Month picker jumps to a month and fits its price range. Drag horizontally to pan into adjacent months. A month with only one cached session initially shows just that session; use **Show adjacent sessions** to restore the surrounding chart. The chart shows the close EMA(20) and two levels fixed at each day's open, based on the previous 10 sessions' average percentage moves from open to high and open to low. Volume and its SMA(20) share the lower area. Indicators carry across months and scheduled market closures, but restart their warmup after a missing scheduled session.
-
-The downloader uses Yahoo Finance daily OHLCV without dividend adjustment, from January 2000 through the last completed US regular session. It prints missing NYSE session dates and writes `data/spy_daily.json`. Rerun the downloader to refresh the snapshot, and reload the page. A refresh that is older than the installed snapshot or omits previously cached days is rejected. The footer distinguishes the last cached bar from the date the exchange calendar was checked through, and warns about missing sessions after the last bar.
-
-For a custom snapshot, pass its path to both commands: `qqq_viewer.spy_daily --cache <path>` and `qqq_viewer.server --spy-cache <path>` (each run with `.\.venv\Scripts\python.exe -m`). The viewer reads locally and needs no internet access to display a downloaded snapshot.
-
-**Initial download verification (November 25, 2026):** Yahoo returned 6,765 bars, from January 3, 2000 through November 24, 2026, with no missing NYSE sessions. The live-cache browser smoke check opened both January 2000 and November 2026 and verified the displayed date ranges.
-
-## Verify
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[test]"
-# Install Chromium only if the Windows installation has no Microsoft Edge.
-.\.venv\Scripts\python.exe -m playwright install chromium
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-Charts use the locally bundled [TradingView Lightweight Charts](https://www.tradingview.com/lightweight-charts/) 4.1.1.
-
-## Verified initial backfill
-
-The local cache covers January 2, 2020 at 09:30 through November 20, 2026 at 15:59 New York time. It contains 673,320 one-minute bars across 1,732 regular sessions. The calendar audit found zero missing minutes and zero conflicting minutes. Repeating the backfill left the cache counts unchanged.
-
-## Opening-range backtest
-
-The command below compares Legacy and Revised rules for the enabled entries
-using the local one-minute QQQ cache. The replay permits sequential trades,
-with one open position at a time. Dates are inclusive and default to
-January 1 through December 31, 2020.
-
-To generate the report for all of 2020, run this from the repository root:
-
-```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.backtest_opening_range --config config/QQQ.toml --start 2020-01-01 --end 2020-12-31
-```
-
-For a shorter date range:
-
-```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.backtest_opening_range --config config/QQQ.toml --start 2020-02-03 --end 2020-04-30
-```
-
-Use a TOML file per ticker and point `cache` to its regular-session SQLite
-cache. Set `enabled = false` in any entry table to exclude that entry.
-`[entry3]` is optional and disabled when omitted. Each entry has its own ATR
-multipliers and risk percentage. `[strategy]` holds the shared exits, buying
-power, tick size, and slippage.
-
-Open `output/QQQ_opening_range_rule_comparison_2020-01-01_2020-12-31.html`
-in a browser. With all three entries enabled, each rule version includes
-Entry 1 only, Entry 2 only, Entry 3 only, Entries 1 and 2, and All enabled
-entries, each with base and doubled slippage. The report opens on Revised.
-Switching **Rules** keeps the selected case in **View**. Use **Show** in the
-Executed Trades Log to filter by entry, or **RID [LazyBear]** to toggle the
-same range bands the backtest uses. Select an order to inspect its working
-window, or a trade to see its fills and active stop path.
-
-Entry 3 looks for a bullish candle from 09:34 through 11:59 New York time
-that closes strictly above the prior RID upper band with its high strictly
-below VWAP. The prior band must contain at least `min_rid_bars` completed
-candles (default 3, configurable from 1 to 25 in `[entry3]`). The breakout
-candle does not count. The first later bearish candle is the signal, even if
-price has returned inside the prior range. The buy stop is the highest high over the
-signal candle and previous four candles, plus `entry_atr × ATR(20)`. The
-initial stop is the lowest low over the signal candle and the previous
-`stop_lookback` candles, minus `stop_atr × ATR(20)`. Both multipliers
-default to 0.25 and the stop lookback defaults to four. Orders become active
-the next minute; a signal stamped 11:59 cannot place a working order before
-noon. Entry 3 uses the existing position sizing and exits.
-
-Revised Entry 2 accepts a bear candle or doji after four consecutive bullish candles. The signal or previous candle must have a high strictly above its own VWAP. Under Revised rules, for all entries, a bear candle entirely below VWAP starts a wait for the next bull candle. At that bull candle's close, the replay uses the preceding lows and configured ATR buffer to calculate a candidate stop, which applies starting on the next minute if it raises the active stop. A later bear candle can start another sequence.
-
-The replay verifies the ticker and session bounds for canonical bars and completion records. It requires complete, conflict-free sessions and uses earlier cached bars for indicator warmup only. The report records its input fingerprint and cost assumptions. Base and doubled-slippage scenarios include modeled IBKR Pro Fixed broker commissions. The additional regulatory and venue fees depend on the applicable schedule and routing and are excluded here.
-
-## SPY five-minute viewer
-
-Open TWS with socket clients enabled. Use the port and volume unit configured in TWS; the example below uses port `7497` and volume in shares. The download sends historical data and contract requests only.
-
-```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_contiguous --port 7497 --volume-unit shares
-.\.venv\Scripts\python.exe -m qqq_viewer.server --port 8765
-```
-
-The same download command builds a fresh cache or refreshes an existing published range. A fresh build checks months backward from the last completed NYSE session to find the uninterrupted range; a refresh checks forward from the installed endpoint and cannot advance past an incomplete session. It resumes staged work in `data/spy_5m_contiguous_audit.sqlite3` and publishes verified bars to `data/spy_5m.sqlite3`. Use `--through YYYY-MM-DD` to fix the cutoff; use `--floor YYYY-MM-DD` on a fresh build to change the earliest date considered (default `2004-01-23`). A gap that blocks the requested cutoff is reported and leaves later bars in staging. Use a separate `--staging-db` for separate viewer caches. Match the downloader's `--db` to the server's `--spy-5m-db`; the server's `--spy-cache` selects the Yahoo daily snapshot.
-
-Open [the separate five-minute viewer](http://127.0.0.1:8765/spy/5m). The picker covers published months and opens the first cached session in the selected month. Drag horizontally to browse the month. The purple line is cumulative session **VWAP**, calculated from each five-minute bar's stored weighted average price (`wap` — IBKR's five-minute weighted price for TWS sessions, and volume-weighted 1-minute typical price `(H + L + C) / 3` for Sierra-extended sessions) and volume. A missing bar or unusable positive-volume weighted price stops VWAP until the next open. The amber and blue lines copy the SPY daily upper and lower levels by New York date. The legend identifies a missing, invalid, or withheld level for the selected session. The footer shows the published range separately from an outstanding requested cutoff. The viewer works with TWS closed.
-
-**Published coverage verified November 28, 2026:** May 5, 2008 through November 24, 2026; **4,670 sessions and 362,856 bars** (`1,384` complete-minute Sierra `.scid` sessions + `37` TWS-patched sessions + `3,249` preserved TWS sessions from December 24, 2013 onward), with no missing, unverified, or conflicting bars. The pure-TWS cache is preserved at `data/spy_5m_tws_2013_2026.sqlite3`. See the [dated probe and coverage record](docs/spy-5m-coverage.md) for evidence and the offline verification command.
-
-To extend an existing published share-volume TWS cache (`--db`) backward using a local Sierra Chart `.scid` file (`--scid`, untracked external file), run `qqq_viewer.spy_5m_extend`. It stages complete Sierra sessions in `--staging-db` (default `data/spy_5m_sierra_staging.sqlite3`, resumed across runs unless `--reset-staging` is passed), validates 5% price-basis parity against `--daily-cache` (`data/spy_daily.json`), fetches any missing/incomplete pre-history sessions from TWS, and writes the combined cache to `--out-db` (default `data/spy_5m_extended.sqlite3`). Passing `--promote` requires `--backup <unused-path>` (or `--allow-no-backup`), aborts if any gap remains unverified, backs up `--db`, and replaces `--db` atomically without WAL sidecars. `--floor` defaults to the first NYSE date in `--scid` and must precede `--db`'s current start date.
-
-## SPY five-minute Entry 1 backtest
-
-Run the replay from the repository root with the verified intraday cache and SPY daily levels already installed. It reads both locally; TWS does not need to be open. The default `config/SPY.toml` backtest uses the full published range (`2008-05-05`–`2026-11-24`). A successful run without `--output` replaces the date-named default report under `output/`. Pass `--output` with an unused HTML filename to keep a separate report.
-
-```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml
-.\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml --start 2020-01-01 --end 2020-12-31 --output output/SPY_5m_2020_exit3.html
-```
+The former `python -m qqq_viewer.backtest_spy_5m` entry point also invokes the same runner.
 
 A run starts flat with the configured cash at its first signal session.
 The earlier history supplies indicator warmup and prior daily levels.
@@ -150,7 +41,7 @@ Moving `--start` into an existing trade's dates starts a fresh replay.
 2. Place a buy stop at the regular-session high through the bear candle plus the configured ATR(20) buffer, rounded up to the tick. Size the order using the signal session's Daily Lower as the protective stop, rounded down to the tick. A missing or invalid stop prevents submission.
 3. The buy stop becomes eligible on the next regular-session bar and expires at 9:35 a.m. New York time the next NYSE session. The next session's 9:30 candle can fill it. The report's cyan buy-stop line ends at the fill candle or expiry. An order still active at the replay cutoff is shown as pending.
 
-Set `entry1_start_time`, `entry1_end_time` and `entry_atr_buffer` in [`config/SPY.toml`](config/SPY.toml). The window uses five-minute candle start times in New York and applies to the breakout. TOML accepts `"09:30"` and `09:30:00`.
+Set `entry1_start_time`, `entry1_end_time` and `entry_atr_buffer` under `[entry1]` in the symbol config. The window uses five-minute candle start times in New York and applies to the breakout. TOML accepts `"09:30"` and `09:30:00`.
 
 ### Shared stop for Exits 3–5
 
@@ -200,3 +91,35 @@ reflected in net P&L.
 **Profit factor** is total net P&L from winning trades divided by the absolute
 net P&L from losing trades, after modeled costs. It is calculated separately
 for each exit scenario; `∞` means wins without losses and `—` means no nonzero trades.
+
+## SPY daily viewer
+
+The separate daily viewer reads the local SPY daily snapshot. To refresh the snapshot from Yahoo Finance and open the viewer, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m qqq_viewer.spy_daily
+.\.venv\Scripts\python.exe -m qqq_viewer.server --port 8765
+```
+
+Open [the SPY daily viewer](http://127.0.0.1:8765/spy). The Month picker jumps to a month and fits its price range. Drag horizontally to pan into adjacent months. A month with only one cached session initially shows just that session; use **Show adjacent sessions** to restore the surrounding chart. The chart shows the close EMA(20) and two levels fixed at each day's open, based on the previous 10 sessions' average percentage moves from open to high and open to low. Volume and its SMA(20) share the lower area. Indicators carry across months and scheduled market closures, but restart their warmup after a missing scheduled session.
+
+The downloader uses Yahoo Finance daily OHLCV without dividend adjustment, from January 2000 through the last completed US regular session. It prints missing NYSE session dates and writes `data/spy_daily.json`. Rerun the downloader to refresh the snapshot, and reload the page. A refresh that is older than the installed snapshot or omits previously cached days is rejected. The footer distinguishes the last cached bar from the date the exchange calendar was checked through, and warns about missing sessions after the last bar.
+
+For a custom snapshot, pass its path to both commands: `qqq_viewer.spy_daily --cache <path>` and `qqq_viewer.server --spy-cache <path>` (each run with `.\.venv\Scripts\python.exe -m`). The viewer reads locally and needs no internet access to display a downloaded snapshot.
+
+**Initial download verification (November 25, 2026):** Yahoo returned 6,765 bars, from January 3, 2000 through November 24, 2026, with no missing NYSE sessions. The live-cache browser smoke check opened both January 2000 and November 2026 and verified the displayed date ranges.
+
+## Existing data and acquisition
+
+The QQQ one-minute SQLite history remains at `data/qqq.sqlite3`. Its existing maintenance command is `python -m qqq_viewer.backfill`. SPY five-minute history and the existing TWS and Sierra commands are documented in the [coverage record](docs/spy-5m-coverage.md). Preparing local inputs for additional symbols is a separate workflow.
+
+## Verify
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+# Install Chromium only if the Windows installation has no Microsoft Edge.
+.\.venv\Scripts\python.exe -m playwright install chromium
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Charts use the locally bundled [TradingView Lightweight Charts](https://www.tradingview.com/lightweight-charts/) 4.1.1.

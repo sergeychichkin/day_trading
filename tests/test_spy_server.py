@@ -1,6 +1,7 @@
 import json
 from contextlib import contextmanager
 from threading import Thread
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 import pytest
@@ -28,12 +29,7 @@ def snapshot(tmp_path):
 
 @contextmanager
 def running_spy_server(cache):
-    try:
-        server = make_server(cache.with_suffix(".qqq.db"), 0, spy_cache=cache)
-    except TypeError as exc:
-        if "unexpected keyword argument 'spy_cache'" not in str(exc):
-            raise
-        pytest.fail("Server does not accept a SPY cache yet", pytrace=False)
+    server = make_server(0, spy_cache=cache)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -44,15 +40,23 @@ def running_spy_server(cache):
         thread.join()
 
 
-def test_spy_routes_do_not_replace_qqq(snapshot):
+def test_server_keeps_only_daily_viewer_routes_and_assets(snapshot):
     cache, data = snapshot
     with running_spy_server(cache) as url:
         with urlopen(f"{url}/") as response:
-            assert b"<h1>QQQ</h1>" in response.read()
+            assert response.url == f"{url}/spy"
         with urlopen(f"{url}/spy") as response:
             assert b"<h1>SPY</h1>" in response.read()
         with urlopen(f"{url}/api/spy/daily") as response:
             assert json.load(response) == data
+        for path in ("/static/style.css", "/static/spy.js", "/static/vendor/lightweight-charts.js"):
+            with urlopen(f"{url}{path}") as response:
+                assert response.status == 200 and response.read()
+        for path in ("/api/months", "/api/month/2020-01", "/spy/5m", "/api/spy/5m/months",
+                     "/api/spy/5m/month/2020-01", "/static/chart.js", "/static/spy-5m.js"):
+            with pytest.raises(HTTPError) as exc:
+                urlopen(f"{url}{path}")
+            assert exc.value.code == 404
 
 
 def test_spy_api_reports_empty_cache(tmp_path):

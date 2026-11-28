@@ -3,8 +3,7 @@ from datetime import date
 
 from playwright.sync_api import expect
 
-from tests.browser.test_viewer import page
-from tests.test_backtest_spy_5m import replay_files
+from tests.test_backtest_5m import replay_files
 
 
 def capture_price(page):
@@ -74,9 +73,9 @@ def capture_price(page):
 
 
 def test_report_draws_buy_stop_through_overnight_fill_or_expiration(page, replay_files, tmp_path):
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
-    from qqq_viewer.spy_5m_store import sessions
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
+    from equity_backtest.history_5m import sessions
 
     store, _, config = replay_files
     friday, monday = date(2025, 11, 28), date(2025, 12, 1)
@@ -115,9 +114,9 @@ def test_report_draws_buy_stop_through_overnight_fill_or_expiration(page, replay
 
 
 def test_report_shows_pending_order_submitted_on_closing_candle(page, replay_files, tmp_path):
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
-    from qqq_viewer.spy_5m_store import sessions
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
+    from equity_backtest.history_5m import sessions
 
     store, _, config = replay_files
     friday = date(2025, 11, 28)
@@ -136,9 +135,9 @@ def test_report_shows_pending_order_submitted_on_closing_candle(page, replay_fil
 
 
 def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_files, tmp_path):
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
-    from qqq_viewer.spy_5m_store import sessions
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
+    from equity_backtest.history_5m import sessions
 
     store, _, config = replay_files
     friday = date(2025, 11, 28)
@@ -211,8 +210,8 @@ def test_report_switches_exit_modes_and_charts_trade_and_tail_exit(page, replay_
 
 
 def test_trade_log_sorts_numbers_text_dates_and_missing_values(page, replay_files, tmp_path):
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
 
     _, _, config = replay_files
     first, last = "2025-11-26", "2025-11-28"
@@ -256,10 +255,10 @@ def test_trade_log_sorts_numbers_text_dates_and_missing_values(page, replay_file
 
 
 def test_trade_chart_shows_full_cached_window_outside_replay(page, replay_files, tmp_path):
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
-    from qqq_viewer.spy_5m_store import sessions
-    from tests.test_spy_5m_replay import tape
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
+    from equity_backtest.history_5m import sessions
+    from tests.test_replay_5m import tape
 
     store, _, config = replay_files
     friday = date(2025, 11, 28)
@@ -293,8 +292,8 @@ def test_trade_chart_shows_full_cached_window_outside_replay(page, replay_files,
 
 
 def test_report_handles_no_trades(page, replay_files, tmp_path):
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
 
     _, daily, config = replay_files
     payload = json.loads(daily.read_bytes())
@@ -312,9 +311,9 @@ def test_report_handles_no_trades(page, replay_files, tmp_path):
 
 
 def test_stop_and_ambiguity_have_distinct_chart_markers(page, replay_files, tmp_path):
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
-    from qqq_viewer.spy_5m_store import sessions
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
+    from equity_backtest.history_5m import sessions
 
     store, _, config = replay_files
     day = date(2025, 11, 28)
@@ -341,8 +340,8 @@ def test_stop_and_ambiguity_have_distinct_chart_markers(page, replay_files, tmp_
 def test_report_two_months_and_independent_overlays(page, replay_files, tmp_path):
     from dataclasses import replace
 
-    from qqq_viewer.backtest_spy_5m import ChartSettings, load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
+    from equity_backtest.backtest_5m import ChartSettings, load_settings, run
+    from equity_backtest.report_5m import write_report
 
     store, _, config = replay_files
     with store._connection(write=True) as db:
@@ -435,9 +434,9 @@ def test_report_uses_next_calendar_month_across_new_year(page, replay_files, tmp
     from copy import deepcopy
     from datetime import datetime
 
-    from qqq_viewer.backtest_spy_5m import load_settings, run
+    from equity_backtest.backtest_5m import load_settings, run
     from qqq_viewer.sessions import NEW_YORK
-    from qqq_viewer.spy_5m_report import write_report
+    from equity_backtest.report_5m import write_report
 
     _, _, config = replay_files
     payload = run(load_settings(config))
@@ -467,9 +466,9 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     from dataclasses import replace
     from datetime import time
 
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
-    from qqq_viewer.spy_5m_store import sessions
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
+    from equity_backtest.history_5m import sessions
 
     store, daily, config = replay_files
     friday, monday = sessions(date(2025, 11, 28), date(2025, 12, 1))
@@ -526,8 +525,8 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
 
 
 def test_report_sorts_stop_sources_and_marks_daily_raise_at_effective_open(page, replay_files, tmp_path):
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
 
     _, _, config = replay_files
     payload = run(load_settings(config))
@@ -564,8 +563,8 @@ def test_report_sorts_stop_sources_and_marks_daily_raise_at_effective_open(page,
 
 
 def test_report_labels_skips_as_new_entry_outcomes(page, replay_files, tmp_path):
-    from qqq_viewer.backtest_spy_5m import load_settings, run
-    from qqq_viewer.spy_5m_report import write_report
+    from equity_backtest.backtest_5m import load_settings, run
+    from equity_backtest.report_5m import write_report
 
     _, _, config = replay_files
     payload = run(load_settings(config))

@@ -7,9 +7,9 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import Literal
 
-from .opening_range import commission, order_price
-from .sessions import NEW_YORK, Session
-from .spy_5m_store import STEP, FiveMinuteBar, sessions
+from .execution import commission, order_price
+from .market_time import NEW_YORK, Session
+from .history_5m import STEP, FiveMinuteBar, sessions
 
 ExitMode = Literal["same_day_close", "next_session_open", "trailing_stop"]
 StopSource = Literal[3, 4, 5]
@@ -206,9 +206,9 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
                opening_stop_candidates: tuple[StopCandidate, ...] = ()) -> DayResult:
     events: list[OrderEvent] = []
     if exit_mode not in {"same_day_close", "next_session_open", "trailing_stop"}:
-        raise ValueError(f"Unknown SPY exit mode: {exit_mode}")
+        raise ValueError(f"Unknown five-minute exit mode: {exit_mode}")
     if len(atrs) != len(bars):
-        raise ValueError("ATR and SPY bars must be aligned.")
+        raise ValueError("ATR and five-minute bars must be aligned.")
     if exit_mode == "next_session_open" and next_open is None and pending_entry is None:
         return DayResult(None, events, "next_open_unavailable")
     if position is not None and exit_mode != "trailing_stop":

@@ -2,7 +2,6 @@ import json
 
 from playwright.sync_api import expect
 
-from tests.browser.test_viewer import page
 from tests.test_spy_server import running_spy_server, snapshot
 
 

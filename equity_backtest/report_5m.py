@@ -1,4 +1,4 @@
-"""Write a standalone SPY replay report."""
+"""Write a standalone five-minute replay report."""
 
 import html
 import json
@@ -8,6 +8,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 STATIC = Path(__file__).with_name("static")
+CHART_LIBRARY = STATIC / "vendor" / "lightweight-charts.js"
 TOKENS = re.compile(r"\{\{(TITLE|CSS|PAYLOAD|LIBRARY|SCRIPT)\}\}")
 
 
@@ -25,12 +26,12 @@ def write_report(path: Path, data: dict, *, replace_existing: bool = False) -> N
         _validate_windows_output_name(path)
     values = {
         "TITLE": html.escape(f'{data["ticker"]} Five-Minute Entry 1 Backtest'),
-        "CSS": (STATIC / "opening-range.css").read_text(encoding="utf-8-sig"),
-        "LIBRARY": (STATIC / "vendor/lightweight-charts.js").read_text(encoding="utf-8-sig"),
-        "SCRIPT": (STATIC / "spy-5m-report.js").read_text(encoding="utf-8-sig"),
+        "CSS": (STATIC / "report-5m.css").read_text(encoding="utf-8-sig"),
+        "LIBRARY": CHART_LIBRARY.read_text(encoding="utf-8-sig"),
+        "SCRIPT": (STATIC / "report-5m.js").read_text(encoding="utf-8-sig"),
         "PAYLOAD": json.dumps(data, allow_nan=False, separators=(",", ":")).replace("<", "\\u003c"),
     }
-    template = (STATIC / "spy-5m-report.html").read_text(encoding="utf-8-sig")
+    template = (STATIC / "report-5m.html").read_text(encoding="utf-8-sig")
     report = TOKENS.sub(lambda match: values[match[1]], template)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not replace_existing:

@@ -20,7 +20,7 @@ from .spy_5m_snapshot import SQLITE_SIDECARS, close_wal, read_snapshot, sqlite_p
 from .spy_5m_store import (
     DEFAULT_DB, FiveMinuteStore, by_session, expected_times, publication, sessions, usable_session,
 )
-from .spy_5m_view import _daily_levels, daily_price_pair, price_basis_mismatch
+from .price_basis import load_daily_rows, daily_price_pair, price_basis_mismatch
 from .spy_daily import DEFAULT_CACHE as DEFAULT_DAILY_CACHE
 
 DEFAULT_STAGING = Path("data/spy_5m_sierra_staging.sqlite3")
@@ -31,7 +31,7 @@ TWS_PATCH_DIAGNOSTIC = "tws-1d-patch"
 def _load_daily_reference(daily_cache: Path | None) -> dict | None:
     if daily_cache is None:
         return None
-    daily, status = _daily_levels(daily_cache)
+    daily, status = load_daily_rows(daily_cache)
     if status != "available":
         raise ValueError(f"SPY daily snapshot is {status} at {daily_cache}; cannot verify Sierra price basis.")
     return daily
