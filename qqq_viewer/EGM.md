@@ -65,31 +65,53 @@ publishes a JSON snapshot for the SPY chart.
 
 - `spy_5m_backfill.py` owns SPY contract qualification and bounded TWS
   history requests. Its original January 2000 probe is a separate diagnostic.
-- `spy_5m_contiguous.py` is the supported build, refresh, and read-only
-  verification command. It revalidates the attached staging snapshot within
-  the publication transaction and never advances the published endpoint
+- `spy_5m_contiguous.py` is the supported forward build, refresh, and read-only
+  verification command (`verify_published`, `validate_window`, `copy_window`,
+  `identity`, `require_distinct`). It revalidates the attached staging snapshot
+  within the publication transaction and never advances the published endpoint
   across incomplete sessions.
-- `spy_5m_store.py` owns the independent SQLite schema and NYSE 300-second
-  grid. Verification requires a full successful response and positive total
-  volume. UTC bars retain broker WAP; a duplicate may fill missing WAP but
-  cannot replace accepted values. Conflicting revisions are flagged.
+- `spy_5m_sierra.py` validates Sierra Chart `.scid` binary layouts (`SC_EPOCH`,
+  `scid_identity`, `scid_first_date`), binary-searches contiguous session spans,
+  and aggregates RTH records in O(1) bucket memory onto the 5-minute grid
+  (`read_scid_five_minute_details`, `read_scid_five_minute_bars`). 1-minute OHLC
+  bars (`open > 0`) round to 2 decimals with `wap` computed from volume-weighted
+  1-minute typical prices `(H + L + C) / 3` (`None` when zero volume); `trades=1`
+  ticks round to 4 decimals; `read_scid_five_minute_details` flags whether all
+  1-minute slots in a bar-mode session are present.
+- `spy_5m_extend.py` (`extend_spy_5m`, `main`) extends a published share-volume
+  TWS cache backward using a `.scid` file (`--scid`, `--db`, `--out-db`,
+  `--staging-db`, `--daily-cache`, `--floor`, `--backup`, `--promote`,
+  `--reset-staging`). It stages complete-minute Sierra sessions passing 5% daily
+  price-basis checks (`sierra-scid-1m`), batches/retries TWS requests for
+  remaining pre-history gaps (`tws-1d-patch`), validates staging bars in-transaction,
+  preserves the original TWS tail and `max(requested_through, source_end)`, and
+  only promotes when unblocked and backed up (or `--allow-no-backup`).
+- `spy_5m_snapshot.py` provides `read_snapshot` (safely copying DB + WAL and
+  checkpointing private non-empty WALs before `?mode=ro`) plus `sqlite_paths`,
+  `unlink_sqlite`, and `close_wal`.
+- `spy_5m_store.py` owns the independent SQLite schema, `by_session`, and NYSE
+  300-second grid. Verification requires a full successful response and positive
+  total volume. Stored per-bar `wap` retains broker WAP for TWS sessions and
+  1-minute typical-price weighted averages for Sierra sessions; duplicates may
+  fill missing `wap` but cannot replace accepted values. Conflicting revisions
+  are flagged. `attempts.diagnostic` records session provenance (`sierra-scid-1m`,
+  `tws-1d-patch`, or TWS request diagnostics).
 - `spy_5m_view.py` builds month payloads for `/api/spy/5m/months` and
-  `/api/spy/5m/month/<YYYY-MM>`. VWAP resets at the open and is unavailable
-  after a gap or unusable positive-volume WAP. `upper` and `lower` come from
-  the SPY daily JSON, joined on exchange-local date without rescaling. The
-  API reports published bounds and requested cutoff separately, and a level
-  status per session.
-- `backtest_spy_5m.py` runs Entry 1 offline against the publisher's verified
-  SQLite range and the Yahoo/SPY daily snapshot. It checks cache identity and
-  published NYSE endpoints, copies SQLite inputs to a private snapshot, and
-  records both input fingerprints and the roles of any verified retained
-  sessions before publication. Entry 1 checks session VWAP against daily Upper
-  and can carry a buy stop to 09:35 ET the next NYSE session. Exit 3 keeps the
-  initial stop through the first session after the fill and uses either of the
-  two preceding session lowers on later sessions. It checks the same-date open when verified
-  intraday data is available. The separate viewer checks the close as well.
-  `spy_5m_replay.py` carries one Exit 3 position across sessions, activates a
-  higher stop on the next bar, and keeps realized P&L and sizing cash in
+  `/api/spy/5m/month/<YYYY-MM>`. Cumulative session VWAP resets at the open and
+  is unavailable after a gap or unusable positive-volume `wap`. `upper` and
+  `lower` come from the SPY daily JSON, joined on exchange-local date without
+  rescaling. The API reports published bounds and requested cutoff separately,
+  and a level status per session.
+- `backtest_spy_5m.py` runs Entry 1 offline against the verified SQLite range
+  (`data/spy_5m.sqlite3`) and the Yahoo/SPY daily snapshot. It checks cache identity
+  and published NYSE endpoints, copies SQLite inputs to a private snapshot,
+  validates/fingerprints/charts `wap`, and records both input fingerprints and the
+  roles of any verified retained sessions before publication. Entry 1 checks session VWAP against daily Upper
+  and can carry a buy stop to 09:35 ET the next NYSE session. Exit 3 can raise
+  the stop once per session from the 09:45 ET candle on holding days 3–9 by
+  default. It checks the two preceding Daily Lowers against verified opens.
+  Exits 4 and 5 use completed daily bars for the next open. `spy_5m_replay.py`
+  combines these rules on one stop, records the active rule, and keeps realized P&L and sizing cash in
   decimal. `spy_5m_report.py` writes standalone HTML, replacing the default
   report after the new report is ready. An explicit output path requires a
   new file.

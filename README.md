@@ -125,13 +125,15 @@ Open TWS with socket clients enabled. Use the port and volume unit configured in
 
 The same download command builds a fresh cache or refreshes an existing published range. A fresh build checks months backward from the last completed NYSE session to find the uninterrupted range; a refresh checks forward from the installed endpoint and cannot advance past an incomplete session. It resumes staged work in `data/spy_5m_contiguous_audit.sqlite3` and publishes verified bars to `data/spy_5m.sqlite3`. Use `--through YYYY-MM-DD` to fix the cutoff; use `--floor YYYY-MM-DD` on a fresh build to change the earliest date considered (default `2004-01-23`). A gap that blocks the requested cutoff is reported and leaves later bars in staging. Use a separate `--staging-db` for separate viewer caches. Match the downloader's `--db` to the server's `--spy-5m-db`; the server's `--spy-cache` selects the Yahoo daily snapshot.
 
-Open [the separate five-minute viewer](http://127.0.0.1:8765/spy/5m). The picker covers published months and opens the first cached session in the selected month. Drag horizontally to browse the month. The purple line is session VWAP, using IBKR's five-minute weighted prices and volume. A missing bar or unusable positive-volume weighted price stops VWAP until the next open. The amber and blue lines copy the SPY daily upper and lower levels by New York date. The legend identifies a missing, invalid, or withheld level for the selected session. The footer shows the published range separately from an outstanding requested cutoff. The viewer works with TWS closed.
+Open [the separate five-minute viewer](http://127.0.0.1:8765/spy/5m). The picker covers published months and opens the first cached session in the selected month. Drag horizontally to browse the month. The purple line is cumulative session **VWAP**, calculated from each five-minute bar's stored weighted average price (`wap` — IBKR's five-minute weighted price for TWS sessions, and volume-weighted 1-minute typical price `(H + L + C) / 3` for Sierra-extended sessions) and volume. A missing bar or unusable positive-volume weighted price stops VWAP until the next open. The amber and blue lines copy the SPY daily upper and lower levels by New York date. The legend identifies a missing, invalid, or withheld level for the selected session. The footer shows the published range separately from an outstanding requested cutoff. The viewer works with TWS closed.
 
-**Published coverage verified November 25, 2026:** December 24, 2013 through November 24, 2026; **3,249 sessions and 252,450 bars**, with no missing, unverified, or conflicting bars. January 23, 2004 was the earliest observed full session, but the older data had gaps. See the [dated probe and coverage record](docs/spy-5m-coverage.md) for evidence and the offline verification command.
+**Published coverage verified November 28, 2026:** May 5, 2008 through November 24, 2026; **4,670 sessions and 362,856 bars** (`1,384` complete-minute Sierra `.scid` sessions + `37` TWS-patched sessions + `3,249` preserved TWS sessions from December 24, 2013 onward), with no missing, unverified, or conflicting bars. The pure-TWS cache is preserved at `data/spy_5m_tws_2013_2026.sqlite3`. See the [dated probe and coverage record](docs/spy-5m-coverage.md) for evidence and the offline verification command.
+
+To extend an existing published share-volume TWS cache (`--db`) backward using a local Sierra Chart `.scid` file (`--scid`, untracked external file), run `qqq_viewer.spy_5m_extend`. It stages complete Sierra sessions in `--staging-db` (default `data/spy_5m_sierra_staging.sqlite3`, resumed across runs unless `--reset-staging` is passed), validates 5% price-basis parity against `--daily-cache` (`data/spy_daily.json`), fetches any missing/incomplete pre-history sessions from TWS, and writes the combined cache to `--out-db` (default `data/spy_5m_extended.sqlite3`). Passing `--promote` requires `--backup <unused-path>` (or `--allow-no-backup`), aborts if any gap remains unverified, backs up `--db`, and replaces `--db` atomically without WAL sidecars. `--floor` defaults to the first NYSE date in `--scid` and must precede `--db`'s current start date.
 
 ## SPY five-minute Entry 1 backtest
 
-Run the replay from the repository root with the verified intraday cache and SPY daily levels already installed. It reads both locally; TWS does not need to be open. The default backtest uses the full published range. A successful run without `--output` replaces the date-named default report under `output/`. Pass `--output` with an unused HTML filename to keep a separate report.
+Run the replay from the repository root with the verified intraday cache and SPY daily levels already installed. It reads both locally; TWS does not need to be open. The default `config/SPY.toml` backtest uses the full published range (`2008-05-05`–`2026-11-24`). A successful run without `--output` replaces the date-named default report under `output/`. Pass `--output` with an unused HTML filename to keep a separate report.
 
 ```powershell
 .\.venv\Scripts\python.exe -m qqq_viewer.backtest_spy_5m --config config/SPY.toml
@@ -150,16 +152,23 @@ Moving `--start` into an existing trade's dates starts a fresh replay.
 
 Set `entry1_start_time`, `entry1_end_time` and `entry_atr_buffer` in [`config/SPY.toml`](config/SPY.toml). The window uses five-minute candle start times in New York and applies to the breakout. TOML accepts `"09:30"` and `09:30:00`.
 
-### Exit 3
+### Shared stop for Exits 3–5
 
-The default exit carries the position until stopped. Keep the initial stop through the first NYSE session after the fill. From the second following session onward, a bull candle with a high strictly below either of the preceding two sessions' valid Daily Lowers can raise the stop. Use the candle low minus half its ATR(20), rounded down to the tick. Apply a higher stop from the next bar. The report shows any position still open at cutoff.
+The default replay carries one position and one protective stop. The highest eligible raise takes effect. Ties go to the lowest exit number, and an equal price keeps the active stop's source. **Exit Reason**, after **Net P&L**, gives `Initial SL` or the rule that set the stop at the fill. The report shows any position still open at cutoff.
 
-Daily Lowers come from the Yahoo snapshot. When both opens are available, the replay allows up to a 5% difference between the daily and verified five-minute opens. Adjustment events show the prior level lookups and the stop's trigger and effective times.
+- **Exit 3.** From the 9:45 a.m. ET candle on holding days 3–9, use the first bull candle whose high is strictly below either of the prior two valid Daily Lowers and whose low minus half its five-minute ATR(20) raises the stop. Apply the raise on the next regular-session bar, with at most one effective Exit 3 raise per session. Set the last eligible holding day with `[exit3].max_holding_days`. A raise must take effect by that day's close. The active stop protects the position after that.
+- **Exit 4.** The third consecutive daily bear candle triggers a stop review at the next NYSE open for a carried position.
+- **Exit 5.** A daily EMA20 change from green to red triggers the same review at the next NYSE open for a carried position.
+
+Exits 4 and 5 propose the lowest low of the last four completed daily sessions, including the trigger session, minus 0.25 times the trigger session's daily Wilder ATR(20). Set `lookback` and `atr_multiplier` separately under `[exit4]` and `[exit5]`. All stop proposals round down to the tick. Exit 3 uses Daily Lowers from the Yahoo snapshot and checks available daily and five-minute opens within 5%. The audit shows the source, trigger and effective time of each raise.
+
+Use `trailing_stop`, `exit4` and `exit5` under `[exits]` to toggle the three rules independently.
 
 To run the legacy exits, copy the TOML alongside the original and enable
-`same_day_close` or `next_session_open` in `[exits]`. Set `trailing_stop = false`
-for a legacy-only run and choose a distinct `--output`. Each enabled exit
-compounds independently. If the next verified session is unavailable, the final
+`same_day_close` or `next_session_open` in `[exits]`. For a legacy-only run,
+set `trailing_stop`, `exit4` and `exit5` to `false` and choose a distinct
+`--output`. Each legacy comparison and the shared-stop scenario compound independently.
+If the next verified session is unavailable, the final
 signal day is excluded from next-open entries. The report gives the actual
 signal range and any exit-only date.
 

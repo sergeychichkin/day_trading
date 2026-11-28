@@ -18,8 +18,10 @@ const money = n => usd.format(n);
 const pct = n => n == null ? "—" : `${n.toFixed(2)}%`;
 const profitFactor = n => n === "infinite" ? "∞" : n == null ? "—" : n.toFixed(2);
 const colors = {up: "#10b981", down: "#ef4444", upper: "#f1c375", lower: "#7eb8f1", vwap: "#c6a1fa", order: "#58dbe5"};
-const exitNames = {protective_stop: "Protective stop", same_day_close: "Same-day close", next_session_open: "Next-session open"};
+const exitNames = {same_day_close: "Same-day close", next_session_open: "Next-session open"};
 const exitMarkers = {protective_stop: "Stop", same_day_close: "Day close", next_session_open: "Next open"};
+const stopName = source => source == null ? "Initial SL" : `Exit ${source}`;
+const exitName = trade => trade.exit_reason === "protective_stop" ? stopName(trade.stop_source) : exitNames[trade.exit_reason];
 const STEP = 300;
 
 function chart(id, priceChart = false) {
@@ -157,11 +159,14 @@ function drawEvents(month, lastMonth) {
     } else {
         for (const event of events) {
             const adjustment = event.adjustment;
-            const chartTime = adjustment?.candle_time ?? event.time;
+            const intradayAdjustment = adjustment && (adjustment.source ?? 3) === 3;
+            const trigger = adjustment && scopedBars.get(adjustment.candle_time);
+            const chartTime = intradayAdjustment && trigger ? adjustment.candle_time : event.time;
             let detail = event.detail;
             if (adjustment) {
-                detail += ` · Triggering candle ${timestamp(chartTime)} · Effective ${timestamp(adjustment.effective_time)}`;
-                const lookups = scopedBars.get(chartTime)?.session.prior_lowers ?? [];
+                const triggerLabel = intradayAdjustment ? "Triggering candle" : "Triggering daily close";
+                detail += ` · ${triggerLabel} ${timestamp(adjustment.candle_time)} · Effective ${timestamp(adjustment.effective_time)}`;
+                const lookups = trigger?.session.prior_lowers ?? [];
                 const levels = lookups.slice(0, adjustment.prior_session_count);
                 if (levels.length) {
                     detail += " · Prior daily lowers " + levels.map(level =>
@@ -172,7 +177,8 @@ function drawEvents(month, lastMonth) {
                 timestamp(event.time), event.action, detail, price(event.trigger), price(event.stop), event.shares ?? "—",
             ]);
             row.insertCell().append(button("Show event", () => {
-                jump(event.date, chartTime, `Order event · ${timestamp(event.time)} · ${detail}`);
+                jump(intradayAdjustment && trigger ? trigger.session.date : event.date, chartTime,
+                    `Order event · ${timestamp(event.time)} · ${detail}`);
             }));
         }
     }
@@ -320,9 +326,11 @@ function drawMonth(month, focusDay, focusTime, tradeWindow) {
             drawStops(trade, sessions, end);
         }
         for (const adjustment of trade.stop_adjustments) {
-            if (scopedBars.has(adjustment.candle_time)) {
-                markers.push({time: adjustment.candle_time, position: "belowBar", shape: "circle",
-                    color: colors.down, text: `Next stop ${price(adjustment.new_stop)}`});
+            const source = adjustment.source ?? 3;
+            const time = source === 3 ? adjustment.candle_time : adjustment.effective_time;
+            if (scopedBars.has(time)) {
+                markers.push({time, position: "belowBar", shape: "circle",
+                    color: colors.down, text: `Exit ${source} stop ${price(adjustment.new_stop)}`});
             }
         }
         if (starts.has(trade.exit_date)) {
@@ -368,7 +376,7 @@ function jumpTrade(trade, exit) {
     const shortfall = index === 0 || after < tradeSessionsAfter
         ? ` · Cache coverage: ${index === 0 ? 0 : 1} of 1 prior, ${Math.min(after, tradeSessionsAfter)} of ${tradeSessionsAfter} following sessions`
         : "";
-    jump(day, time, `${exit ? "Exit" : "Entry"}: ${timestamp(time)} · ${exitNames[trade.exit_reason]}`
+    jump(day, time, `${exit ? "Exit" : "Entry"}: ${timestamp(time)} · ${exitName(trade)}`
         + (trade.ambiguous ? " · Ambiguous path: simulated entry then stop" : "") + shortfall, window, trade.date);
 }
 
@@ -386,7 +394,7 @@ let sortedTradeHeader = null;
 let tradeSortDirection = 1;
 
 function tradeSortValue(trade, field) {
-    if (field === "exit_reason") return exitNames[trade.exit_reason];
+    if (field === "exit_reason") return exitName(trade);
     return trade[field] ?? trade.prior_daily?.[field];
 }
 
@@ -428,15 +436,16 @@ function drawTradeLog() {
         const row = addRow(body, [trade.date, signalTime, clockTime(trade.entry_time),
             price(trade.entry_price), price(trade.initial_stop), timestamp(trade.exit_time), price(trade.exit_price),
             trade.holding_days ?? "—", trade.mfe_r.toFixed(2), trade.mae_r.toFixed(2), money(trade.pnl),
+            exitName(trade),
             streak > 0 ? `+${streak}` : streak ?? "—", daily.volume_sma20_ratio?.toFixed(2) ?? "—",
             daily.body_atr20_ratio?.toFixed(2) ?? "—", pct(daily.atr20_close_pct),
-            "", exitNames[trade.exit_reason], money(trade.commission), money(trade.slippage), count.format(trade.shares),
+            "", money(trade.commission), money(trade.slippage), count.format(trade.shares),
         ]);
         const pnl = row.cells[10];
         if (trade.pnl > 0) pnl.classList.add("positive");
         if (trade.pnl < 0) pnl.classList.add("negative");
         row.addEventListener("click", () => jumpTrade(trade, false));
-        const controls = row.cells[15];
+        const controls = row.cells[16];
         controls.append(button("Show entry", () => jumpTrade(trade, false)), " ", button("Show exit", () => jumpTrade(trade, true)));
     }
 }
@@ -448,10 +457,10 @@ function drawOpenPosition() {
     summary.hidden = !position;
     if (!position) return;
     const mark = `Unrealized P&L ${money(position.unrealized_pnl)} at ${price(position.mark_price)} on ${timestamp(position.mark_time)}`;
-    const queuedStop = position.pending_stop == null ? "" : ` · Next session stop ${price(position.pending_stop)}`;
+    const queuedStop = position.pending_stop == null ? "" : ` · Queued Exit 3 stop ${price(position.pending_stop)}`;
     const details = document.createElement("p");
     details.textContent = `Open position · ${position.entry_date} ${clockTime(position.entry_time)} · ${count.format(position.shares)} shares`
-        + ` at ${price(position.entry_price)} · Active stop ${price(position.active_stop)}${queuedStop} · ${mark}`;
+        + ` at ${price(position.entry_price)} · Active stop ${price(position.active_stop)} (${stopName(position.active_stop_source)})${queuedStop} · ${mark}`;
     summary.append(details, button("Show open entry", () =>
         jump(position.entry_date, position.entry_time, `Open entry · ${timestamp(position.entry_time)}`)));
 }
@@ -507,6 +516,13 @@ get("coverage").textContent = `${count.format(c.signal_sessions)} signal session
     + (c.retained_inputs.length ? " · See input coverage for retained sessions" : "")
     + (c.next_open_tail ? ` · ${c.next_open_tail} included only for a next-open exit (${count.format(c.exit_only_bars)} bars)` : "")
     + (c.next_open_tail_unavailable ? ` · Next open unavailable: ${c.next_open_tail_unavailable}` : "");
+const exit3LastDay = data.settings.exit3_max_holding_days ?? 9;
+let exit3Summary = "";
+if (data.settings.trailing_stop) {
+    exit3Summary = exit3LastDay < 3 ? " Exit 3 has no eligible holding days with the configured cutoff."
+        : ` Exit 3 can raise the stop once per NYSE session from the 09:45 ET candle, during holding days 3–${exit3LastDay}.`
+            + " The raise takes effect on the next regular bar.";
+}
 get("execution").textContent = `After a bull close above daily Upper, VWAP must confirm and still be above Upper at the first eligible bear close. `
     + `The buy stop uses the session high through that candle plus ${entry.entry_atr_buffer} × ATR(20). `
     + "Initial stop uses the signal session's daily Lower rounded down to the configured tick. "
@@ -514,9 +530,8 @@ get("execution").textContent = `After a bull close above daily Upper, VWAP must 
     + `$${data.settings.account_exact?.slippage_floor ?? account.slippage_floor} or ${account.slippage_bps} bp per fill. `
     + "Ambiguous five-minute paths assume entry then stop. "
     + "Gaps, costs and slippage can raise losses above the sizing budget."
-    + (data.settings.trailing_stop ? " Exit 3 keeps the original stop through the first NYSE session after the fill."
-        + " Later sessions can use either of the two preceding daily Lowers."
-        + " A higher stop applies from the next bar." : "");
+    + exit3Summary
+    + (data.settings.exit4 || data.settings.exit5 ? " Enabled daily exit rules use completed daily bars. A higher stop can take effect at the next NYSE open." : "");
 get("provenance").textContent = JSON.stringify({settings: data.settings, fingerprints: data.fingerprints, coverage: c}, null, 2);
 benchmark.setData(data.benchmark);
 get("scenario").addEventListener("change", drawScenario);

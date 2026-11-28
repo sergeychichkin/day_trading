@@ -14,11 +14,12 @@ from collections import Counter, deque
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 from .opening_range import WilderATR, commission
 from .sessions import NEW_YORK
-from .spy_5m_replay import AccountSettings, EntrySettings, replay_day, session_vwap_totals
+from .spy_5m_replay import AccountSettings, EntrySettings, StopCandidate, replay_day, session_vwap_totals
 from .spy_5m_report import _validate_windows_output_name
 from .spy_5m_snapshot import SQLITE_SIDECARS, read_snapshot
 from .spy_5m_store import BAR_FIELDS, STEP, FiveMinuteBar, expected_times, normalize_bar, publication, sessions
@@ -28,8 +29,7 @@ from .store import Bar
 SPY_CONTRACT = "756733"
 BAR_FINGERPRINT = struct.Struct("!q6d?")
 LEGACY_SPY_DAILY_SHA256 = "b955d740c3111250be921f84ecbffd72c37fe2fda8c8c255496a9a27918e9577"
-LABELS = {"same_day_close": "Same-day close", "next_session_open": "Next-session open",
-          "trailing_stop": "Exit 3 · Trailing stop"}
+LEGACY_EXIT_LABELS = {"same_day_close": "Same-day close", "next_session_open": "Next-session open"}
 TRADE_CHART_SESSIONS_AFTER = 20
 
 
@@ -37,6 +37,12 @@ TRADE_CHART_SESSIONS_AFTER = 20
 class ChartSettings:
     high_atr_multiplier: float = 0.25
     low_atr_multiplier: float = 0.5
+
+
+@dataclass(frozen=True)
+class DailyStopSettings:
+    lookback: int = 4
+    atr_multiplier: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -50,6 +56,11 @@ class BacktestSettings:
     next_session_open: bool
     trailing_stop: bool = False
     chart: ChartSettings = ChartSettings()
+    exit4: bool = False
+    exit5: bool = False
+    exit3_max_holding_days: int = 9
+    exit4_settings: DailyStopSettings = DailyStopSettings()
+    exit5_settings: DailyStopSettings = DailyStopSettings()
 
 
 def _table(config, name, allowed):
@@ -91,10 +102,25 @@ def _settings_entry(values):
     return entry
 
 
+def _days(value, key):
+    if type(value) is not int or value < 1:
+        raise ValueError(f"{key} must be a positive integer.")
+    return value
+
+
+def _daily_stop_settings(data, name):
+    values = _table(data, name, ["lookback", "atr_multiplier"])
+    lookback = _days(values.get("lookback", 4), f"{name}.lookback")
+    multiplier = _numeric(values.get("atr_multiplier", 0.25), f"{name}.atr_multiplier")
+    if multiplier < 0:
+        raise ValueError(f"{name}.atr_multiplier cannot be negative.")
+    return DailyStopSettings(lookback, multiplier)
+
+
 def load_settings(path: Path) -> BacktestSettings:
     with path.open("rb") as file:
         data = tomllib.load(file, parse_float=Decimal)
-    if set(data) - {"ticker", "intraday_cache", "daily_cache", "entry1", "account", "exits", "chart"}:
+    if set(data) - {"ticker", "intraday_cache", "daily_cache", "entry1", "account", "exits", "chart", "exit3", "exit4", "exit5"}:
         raise ValueError("SPY settings contain an unknown top-level key.")
     if data.get("ticker") != "SPY":
         raise ValueError("The five-minute runner currently supports only a verified SPY cache.")
@@ -130,11 +156,15 @@ def load_settings(path: Path) -> BacktestSettings:
         chart[key] = _numeric(value, key)
         if chart[key] < 0:
             raise ValueError(f"{key} cannot be negative.")
-    exits = dict(same_day_close=True, next_session_open=False, trailing_stop=False)
+    exits = dict(same_day_close=True, next_session_open=False, trailing_stop=False, exit4=False, exit5=False)
     exits.update(_table(data, "exits", exits))
     if any(type(value) is not bool for value in exits.values()) or not any(exits.values()):
         raise ValueError("Enable at least one exit with boolean settings.")
-    return BacktestSettings("SPY", *inputs, entry, account, chart=ChartSettings(**chart), **exits)
+    exit3 = _table(data, "exit3", ["max_holding_days"])
+    return BacktestSettings("SPY", *inputs, entry, account, chart=ChartSettings(**chart),
+                            exit3_max_holding_days=_days(exit3.get("max_holding_days", 9), "exit3.max_holding_days"),
+                            exit4_settings=_daily_stop_settings(data, "exit4"),
+                            exit5_settings=_daily_stop_settings(data, "exit5"), **exits)
 
 
 def _positive(value):
@@ -165,28 +195,38 @@ def _daily_snapshot(path):
     return daily, digest
 
 
-def _prior_daily_stats(daily, end):
+def _daily_context(daily, end, rules, tick_size):
     if not daily:
-        return {}
+        return {}, {}
     calendar = sessions(date.fromisoformat(min(daily)), end)
     stats = {}
+    opening_stops = {}
     atr = WilderATR(20)
     volumes = deque(maxlen=20)
     streak = 0
+    bear_streak = 0
+    lows = deque(maxlen=min(len(calendar), max((rule.lookback for _, rule in rules), default=0)))
+    tick = Fraction(str(tick_size))
     previous = None
+    proposals = ()
     for session in calendar:
         day = session.date.isoformat()
         stats[day] = previous
+        opening_stops[day] = proposals
+        proposals = ()
         row = daily.get(day, {})
         opening, high, low, close = (_positive(row.get(field)) for field in ("open", "high", "low", "close"))
         if None in (opening, high, low, close) or not low <= min(opening, close) <= max(opening, close) <= high:
             atr = WilderATR(20)
             volumes.clear()
             streak = 0
+            bear_streak = 0
+            lows.clear()
             previous = None
             continue
 
         direction = row.get("ema_direction")
+        ema_flip = direction == "down" and streak > 0
         if direction == "up":
             streak = max(streak, 0) + 1
         elif direction == "down":
@@ -204,6 +244,19 @@ def _prior_daily_stats(daily, end):
             volumes.append(volume)
         average = math.fsum(volumes) / 20 if len(volumes) == 20 else None
         atr_value = atr.update(Bar(session.open_utc, opening, high, low, close, max(volume, 0)))
+        bear_streak = bear_streak + 1 if close < opening else 0
+        lows.append(low)
+        if atr_value is not None and (bear_streak == 3 or ema_flip):
+            triggered = {4: bear_streak == 3, 5: ema_flip}
+            candidates = []
+            for source, rule in rules:
+                if triggered[source] and len(lows) >= rule.lookback:
+                    low_floor = Fraction(str(min(list(lows)[-rule.lookback:])))
+                    buffer = Fraction(str(atr_value)) * Fraction(str(rule.atr_multiplier))
+                    stop = ((low_floor - buffer) // tick) * tick
+                    if stop > 0:
+                        candidates.append(StopCandidate(source, session.close_utc, float(stop)))
+            proposals = tuple(candidates)
         previous = {
             "date": day,
             "ema20_streak": streak if direction in ("up", "down", "neutral") else None,
@@ -211,7 +264,7 @@ def _prior_daily_stats(daily, end):
             "body_atr20_ratio": abs(close - opening) / atr_value if atr_value else None,
             "atr20_close_pct": 100 * (atr_value / close) if atr_value is not None else None,
         }
-    return stats
+    return stats, opening_stops
 
 
 def _opening_matches(daily_open, opening):
@@ -363,7 +416,8 @@ def _position_mark(position, session, close):
         "entry_time": position.entry_time, "entry_date": _ny_date(position.entry_time),
         "signal_time": position.signal_time, "bear_time": position.bear_time,
         "entry_price": float(position.entry_price), "initial_stop": position.initial_stop,
-        "active_stop": position.active_stop, "pending_stop": position.pending_stop,
+        "active_stop": position.active_stop, "active_stop_source": position.active_stop_source,
+        "pending_stop": position.pending_stop.price if position.pending_stop is not None else None,
         "shares": position.shares, "stop_adjustments": [asdict(item) for item in position.stop_adjustments],
         "mark_price": close, "mark_time": session.close_utc, "unrealized_pnl": float(pnl),
     }
@@ -373,10 +427,16 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
     if settings.ticker != "SPY":
         raise ValueError("The five-minute runner supports only SPY.")
     daily, daily_digest = _daily_snapshot(settings.daily_cache)
-    modes = [key for key in LABELS if getattr(settings, key)]
-    if not modes:
+    labels = {key: label for key, label in LEGACY_EXIT_LABELS.items() if getattr(settings, key)}
+    daily_rules = tuple((source, rule) for source, enabled, rule in (
+        (4, settings.exit4, settings.exit4_settings), (5, settings.exit5, settings.exit5_settings),
+    ) if enabled)
+    if settings.trailing_stop or daily_rules:
+        labels["trailing_stop"] = "Exits 3–5 · Shared stop" if settings.trailing_stop and len(daily_rules) == 2 else "Managed stop"
+    if not labels:
         raise ValueError("Enable at least one exit.")
-    cases = [{"id": mode, "label": LABELS[mode], "trades": [], "events": [], "equity": [],
+    modes = list(labels)
+    cases = [{"id": mode, "label": labels[mode], "trades": [], "events": [], "equity": [],
               "skips": Counter(), "open_position": None, "pending_entry": None}
              for mode in modes]
     pending_entries = dict.fromkeys(modes)
@@ -416,7 +476,7 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
             raise ValueError("No NYSE signal sessions in the selected date range.")
         days = [session for session in calendar if session.date <= signal_days[-1].date]
         signal_end = signal_days[-1].date
-        daily_stats = _prior_daily_stats(daily, signal_end)
+        daily_stats, opening_stops = _daily_context(daily, signal_end, daily_rules, settings.account.tick_size)
         candidate = None
         before_cache = sessions(first - timedelta(days=14), first - timedelta(days=1))[-2:]
         for session in before_cache:
@@ -497,7 +557,6 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                     _point(benchmark, session.open_utc, initial)
                 _point(benchmark, session.close_utc, initial * bars[-1].close / benchmark_open)
                 next_open = (following.open_utc, next_bars[0].open) if following else None
-                previous_session_date = date.fromisoformat(priors[0]["date"]) if priors else None
                 for case in cases:
                     mode = case["id"]
                     equity = balances[mode]
@@ -509,9 +568,11 @@ def run(settings: BacktestSettings, start: date | None = None, end: date | None 
                         session, bars, atrs, chart_session["upper"], equity, settings.entry, settings.account, mode,
                         session_lower=chart_session["lower"], next_open=next_open, position=position if trailing else None,
                         prior_lowers=tuple(item["lower"] for item in priors) if trailing else (None, None),
-                        previous_session_date=previous_session_date if trailing else None,
                         next_bar_open=upcoming.open_utc if upcoming else None,
                         pending_entry=pending_entries[mode],
+                        holding_day=i - session_index[_ny_date(position.entry_time)] + 1 if trailing and position else None,
+                        exit3_enabled=settings.trailing_stop, exit3_max_holding_days=settings.exit3_max_holding_days,
+                        opening_stop_candidates=opening_stops.get(day, ()) if trailing else (),
                     )
                     pending_entries[mode] = result.pending_entry
                     if trailing:

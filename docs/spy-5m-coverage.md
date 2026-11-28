@@ -36,26 +36,9 @@ on **December 23, 2013**. The monthly request plus a one-day retry provided
 The next NYSE session, **December 24, 2013**, starts the TWS-only continuous
 range (`3,249` sessions / `252,450` bars through **November 24, 2026**).
 
-## Extended uninterrupted range (Sierra Chart + TWS) — November 28, 2026
+### TWS-only rebuild
 
-Using Sierra Chart consolidated US equities 1-minute history (`C:\SierraChart\Data\SPY.scid`, starting **May 5, 2008**) plus TWS 1-day patches for Sierra’s 12 incomplete pre-December 24, 2013 sessions (`2009-09-04`, `2009-10-09`, `2010-01-08`, `2010-05-06`, `2010-07-26`, `2010-11-16`, `2010-12-31`, `2013-03-21`, `2013-05-24`, `2013-06-11`, `2013-06-20`, `2013-11-11`), the published uninterrupted cache in `data/spy_5m.sqlite3` was extended backward to **May 5, 2008**:
-
-- **Published uninterrupted range:** **May 5, 2008** through **November 24, 2026** — **4,670 sessions / 362,856 five-minute bars** with no missing, unverified, or conflicting bars.
-- **Source composition:** `1,409` sessions aggregated from Sierra 1-minute `.scid` records (`sierra-scid-1m`, prices rounded to 2 decimals, 5-minute `wap` computed from volume-weighted 1-minute typical prices `(H + L + C) / 3`), `12` gap sessions patched from TWS (`tws-1d-patch`), and `3,249` original TWS sessions preserved unchanged (`data/spy_5m_tws_2013_2026.sqlite3` retained as a pure-TWS backup).
-
-To reproduce the checks without TWS or a cache write:
-
-```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_contiguous --verify --through 2026-11-24
-```
-
-To re-run the Sierra + TWS extension from a pure-TWS cache:
-
-```powershell
-.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_extend --scid "C:\SierraChart\Data\SPY.scid" --floor 2008-05-05 --port 7497 --backup data/spy_5m_tws_2013_2026.sqlite3 --promote
-```
-
-To rebuild from TWS with the same cutoff, use disposable output paths:
+To rebuild from TWS alone with the same cutoff, use disposable output paths:
 
 ```powershell
 .\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_contiguous --through 2026-11-24 --floor 2004-01-23 --volume-unit shares --db data/spy_5m_rebuild.sqlite3 --staging-db data/spy_5m_rebuild_staging.sqlite3
@@ -67,4 +50,23 @@ January probe remains available as a diagnostic on a separate cache:
 
 ```powershell
 .\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_backfill --volume-unit shares --probe --db data/spy_5m_probe.sqlite3
+```
+
+## Extended uninterrupted range (Sierra Chart + TWS) — November 28, 2026
+
+Using Sierra Chart consolidated US equities 1-minute history (`C:\SierraChart\Data\SPY.scid`, starting **May 5, 2008**) plus TWS 1-day/month patches for the `37` pre-December 24, 2013 sessions where Sierra was missing or lacked full 1-minute completeness (`12` missing/partial 5-minute sessions plus `25` sessions missing 1–8 constituent 1-minute bars), the published uninterrupted cache in `data/spy_5m.sqlite3` was extended backward to **May 5, 2008**:
+
+- **Published uninterrupted range:** **May 5, 2008** through **November 24, 2026** — **4,670 sessions / 362,856 five-minute bars** with no missing, unverified, or conflicting bars.
+- **Source composition (recorded in `attempts.diagnostic`):** `1,384` complete-minute Sierra `.scid` sessions (`sierra-scid-1m`, 1-minute OHLC prices rounded to 2 decimals, 5-minute `wap` computed from volume-weighted 1-minute typical prices `(H + L + C) / 3` and `None` if zero volume, cross-checked within 5% against `data/spy_daily.json`), `37` TWS-patched sessions (`tws-1d-patch`), and `3,249` original TWS sessions preserved unchanged (`data/spy_5m_tws_2013_2026.sqlite3` retained as the pure-TWS backup).
+
+To reproduce the checks without TWS or a cache write:
+
+```powershell
+.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_contiguous --verify --through 2026-11-24
+```
+
+To test re-running the Sierra + TWS extension non-destructively from the preserved pure-TWS backup:
+
+```powershell
+.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_extend --scid "C:\SierraChart\Data\SPY.scid" --db data/spy_5m_tws_2013_2026.sqlite3 --out-db data/spy_5m_extended.sqlite3 --floor 2008-05-05 --port 7497
 ```

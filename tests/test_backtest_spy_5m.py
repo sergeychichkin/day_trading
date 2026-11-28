@@ -346,6 +346,85 @@ def test_exit_modes_compound_independently_and_use_only_verified_next_open(runne
         runner.run(replace(settings, ticker="QQQ"))
 
 
+def shared_stop_daily_rows():
+    days = sessions(date(2025, 10, 1), date(2025, 12, 3))
+    rows = {str(day.date): {"time": str(day.date), "open": 104, "high": 105, "low": 102,
+                           "close": 104.5, "ema_direction": "up", "lower": 98, "upper": 104.1}
+            for day in days}
+    for day in ("2025-11-25", "2025-11-26", "2025-11-28", "2025-12-01"):
+        rows[day]["close"] = 103
+    rows["2025-11-28"].update(low=101, ema_direction="down")
+    rows["2025-12-01"].update(ema_direction="down")
+    return rows
+
+
+def test_daily_stop_candidates_use_completed_trigger_day_and_do_not_repeat(runner, replay_files):
+    _, _, config = replay_files
+    daily = shared_stop_daily_rows()
+    end = date(2025, 12, 3)
+    cfg = runner.load_settings(config)
+    rules = ((4, runner.DailyStopSettings()), (5, runner.DailyStopSettings(2, 0)))
+    _, opening = runner._daily_context(daily, end, rules, cfg.account.tick_size)
+    assert opening["2025-11-28"] == opening["2025-12-02"] == ()
+    fourth, fifth = opening["2025-12-01"]
+    friday = sessions(date(2025, 11, 28), date(2025, 11, 28))[0]
+    assert fourth.source == 4 and fourth.trigger_time == friday.close_utc
+    assert fourth.price == 100.23
+    assert fifth.source == 5 and fifth.price == 101
+    extreme = ((4, runner.DailyStopSettings(4, 1e308)),)
+    assert runner._daily_context(daily, end, extreme, 0.01)[1]["2025-12-01"] == ()
+    daily["2025-12-01"].update(high=900, low=1)
+    assert runner._daily_context(daily, end, rules, 0.01)[1]["2025-12-01"] == (fourth, fifth)
+    for direction in ("neutral", None):
+        daily["2025-11-26"]["ema_direction"] = direction
+        assert runner._daily_context(daily, end, rules, 0.01)[1]["2025-12-01"] == (fourth,)
+    del daily["2025-11-26"]
+    assert runner._daily_context(daily, end, rules, 0.01)[1]["2025-12-01"] == ()
+
+
+def test_managed_scenario_defaults_and_daily_enable_switches(runner, replay_files):
+    _, _, config = replay_files
+    standard = runner.load_settings(Path("config/SPY.toml"))
+    assert (standard.trailing_stop, standard.exit4, standard.exit5) == (True, True, True)
+    assert (standard.exit3_max_holding_days, standard.exit4_settings, standard.exit5_settings) == (
+        9, runner.DailyStopSettings(4, 0.25), runner.DailyStopSettings(4, 0.25),
+    )
+    legacy = replace(runner.load_settings(config), trailing_stop=True, same_day_close=False, next_session_open=False)
+    assert not legacy.exit4 and not legacy.exit5
+    for settings in (legacy, replace(legacy, trailing_stop=False, exit4=True), replace(legacy, trailing_stop=False, exit5=True)):
+        assert [case["id"] for case in runner.run(settings)["scenarios"]] == ["trailing_stop"]
+
+
+def test_runner_applies_daily_raise_only_to_carried_position(runner, replay_files):
+    store, daily, config = replay_files
+    rows = shared_stop_daily_rows()
+    daily.write_text(json.dumps({**DAILY_ID, "bars": list(rows.values())}), encoding="utf-8")
+    wednesday, friday, monday = map(date.fromisoformat, ("2025-11-26", "2025-11-28", "2025-12-01"))
+    following = sessions(monday, monday)[0]
+    with store._connection(write=True) as db:
+        for session in sessions(wednesday, friday):
+            for index, values in enumerate(((104, 104, 99, 104, 104), (104, 104, 103, 104, 104),
+                                             (104, 105, 104, 104.8, 105), (104.8, 105, 104.1, 104.5, 104.5),
+                                             (105, 107, 104, 106, 105.5))):
+                db.execute("UPDATE bars SET open=?,high=?,low=?,close=?,wap=? WHERE time=?",
+                           (*values, session.open_utc + 300 * index))
+        db.execute("UPDATE bars SET open=99,low=98 WHERE time=?", (following.open_utc,))
+    cfg = replace(runner.load_settings(config), same_day_close=False, next_session_open=False, exit4=True, exit5=True)
+    case, = runner.run(cfg, wednesday, monday)["scenarios"]
+    trade, = case["trades"]
+    assert trade["exit_time"] == following.open_utc and trade["stop_source"] == 4 and trade["holding_days"] == 3
+    assert trade["stop_adjustments"][0]["candle_time"] < trade["exit_time"]
+
+    with store._connection(write=True) as db:
+        db.execute("UPDATE bars SET open=104,high=105,close=105,wap=104.5 "
+                   "WHERE time=(SELECT MIN(time)+1200 FROM bars WHERE date=?)", (str(friday),))
+        db.execute("UPDATE bars SET open=105,high=106,low=102,close=105 WHERE time=?", (following.open_utc,))
+    case, = runner.run(cfg, friday, monday)["scenarios"]
+    position = case["open_position"]
+    assert position["entry_date"] == str(monday) and position["active_stop"] == position["initial_stop"] == 98
+    assert position["stop_adjustments"] == []
+
+
 def test_exit3_resolves_exact_prior_sessions_and_warmup_volume(runner, replay_files):
     store, daily, config = replay_files
     with store._connection(write=True) as db:
@@ -411,8 +490,8 @@ def test_exit3_entry_lower_prevents_first_following_raise_and_ignores_legacy_tai
     )
     monday = date(2025, 12, 1)
     monday_session, monday_bars = tape({
-        0: (100, 100.8, 99.8, 100.7), 1: (97, 105, 96, 104),
-        2: (104, 105, 99, 101), 3: (107, 108, 94, 106),
+        3: (100, 100.8, 99.8, 100.7), 4: (97, 105, 96, 104),
+        5: (104, 105, 99, 101), 6: (107, 108, 94, 106),
     }, day=monday)
     with store._connection(write=True) as db:
         db.execute("UPDATE bars SET low=99 WHERE time=?", (monday_session.open_utc,))
@@ -420,18 +499,17 @@ def test_exit3_entry_lower_prevents_first_following_raise_and_ignores_legacy_tai
                    (monday_session.close_utc - 300,))
     cutoff = runner.run(settings, wednesday, monday)["scenarios"][1]["open_position"]
     assert cutoff["active_stop"] == 98 < cutoff["pending_stop"]
-    adjustment, = cutoff["stop_adjustments"]
-    assert adjustment["prior_session_count"] == 2
-    assert adjustment["effective_time"] == runner.sessions(date(2025, 12, 2), date(2025, 12, 2))[0].open_utc
+    assert cutoff["stop_adjustments"] == []
 
     with store._connection(write=True) as db:
         db.executemany("UPDATE bars SET open=?,high=?,low=?,close=? WHERE time=?", [
-            (bar.open, bar.high, bar.low, bar.close, bar.time) for bar in monday_bars[:4]
+            (bar.open, bar.high, bar.low, bar.close, bar.time) for bar in monday_bars[3:7]
         ])
+    settings = replace(settings, entry=replace(settings.entry, entry1_end_time=time(10, 0)))
     extended_data = runner.run(settings, wednesday, monday)
     extended = extended_data["scenarios"][1]
     first, second = extended["trades"]
-    assert first["date"] == wednesday.isoformat() and first["exit_time"] == monday_session.open_utc + 300
+    assert first["date"] == wednesday.isoformat() and first["exit_time"] == monday_session.open_utc + 1200
     adjustment, = first["stop_adjustments"]
     assert adjustment["prior_session_count"] == 2 and adjustment["effective_time"] == first["exit_time"]
     assert second["date"] == monday.isoformat() and first["exit_time"] < second["entry_time"]

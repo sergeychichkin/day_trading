@@ -8,7 +8,7 @@
 ## Exit 3
 
 - Keep the existing bull-candle condition, prior Daily Lower eligibility and stop formula. Count NYSE sessions from the actual fill, with the fill session as day 1, matching **Days** in the Executed Trades Log. The existing first two sessions remain ineligible for Exit 3 raises.
-- The 9:45 a.m. New York candle is the first eligible signal candle. Apply the first strictly higher qualifying stop from the next regular-session bar, with at most one Exit 3 raise generated per NYSE session. A proposal at or below the active stop leaves the day's opportunity available.
+- The 9:45 a.m. New York candle is the first eligible signal candle. Apply the first strictly higher qualifying stop from the next regular-session bar. Allow at most one effective Exit 3 raise per NYSE session. An Exit 3 raise carried in from the prior close uses the allowance only if it wins at the open. A proposal at or below the active stop leaves the day's opportunity available.
 - Make the last eligible holding day configurable, with a default of day 9 inclusive. An Exit 3 raise must take effect by the end of the last eligible session. A stop already in force continues to protect the position afterward.
 
 ## Exits 4 and 5

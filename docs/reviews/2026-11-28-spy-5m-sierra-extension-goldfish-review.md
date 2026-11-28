@@ -50,3 +50,15 @@ Reviewed commits `2e79323..7285a58` on `main` against baseline `08691bf`. Four f
 - `_contiguous_pre_window` (`spy_5m_extend.py#L52-L85`) and `_copy_tables` (`#L38-L49`) duplicate `_validate_window` and `publish` in `spy_5m_contiguous.py` (while `_contiguous_pre_window` omits bar-level validation inside `out_db` assembly), and `spy_5m_extend.py` imports private `_by_session`, `_identity`, `_require_distinct`, and `stage._connection()`.
 - Test gaps: no tests for CLI `main()`, `staging_db` resume/partial-TWS conflicts, `STOP`/`timeout`, `EXDEV`, DST/early-close `.scid`, corrupt 1m `high < low` / `NaN`, or `extend_spy_5m` -> `backtest_spy_5m.run` / `spy_5m_view.month_payload` / `spy_5m_contiguous.acquire` integration.
 - Minor polish: unused `SC_EPOCH` (`spy_5m_sierra.py#L12`) and `"Blocked before ..."` wording (`spy_5m_extend.py#L267`, vs `"Blocked at ..."`).
+
+---
+
+## Resolution
+
+| Finding | Resolution & Verification |
+| --- | --- |
+| **G1–G3** | Updated [README.md](../../README.md), [EGM.md](../../EGM.md), [qqq_viewer/EGM.md](../../qqq_viewer/EGM.md), [spy-5m-coverage.md](../spy-5m-coverage.md), and [design spec](../superpowers/specs/2026-11-28-spy-5m-sierra-extension-design.md) with `4,670` / `362,856` coverage, `spy_5m_extend` CLI/file docs, `#tws-only-rebuild` anchor, `wap` vs cumulative `VWAP`, and `data/spy_5m_tws_2013_2026.sqlite3` in the Nov 24, 2026 reproduction steps. |
+| **G4** | Replaced per-record `buckets` list buffering in `spy_5m_sierra.py` with O(1) running accumulators and sparse contiguous-span `_lower_bound` slicing; enforced monotonic `dt_us`, per-record `0 < low <= min(o,c) <= max(o,c) <= high` validation, `num_trades > 0` bar support, `wap = None` on zero-volume buckets, and 1-minute RTH completeness (`read_scid_five_minute_details`). |
+| **G5** | Added `scid_identity` metadata guard + `--reset-staging` in `spy_5m_extend.py`, withheld incomplete TWS `mapped` bars from `stage.record` to prevent conflict lockouts, queried actual copied DB provenance totals, enforced `volume_unit == "shares"` and 5% `spy_daily.json` price-basis parity, and fetched all `25` partial-minute sessions from TWS (`37` total `tws-1d-patch` sessions). |
+| **G6** | Added pre-build `if promote and blocked` abort, `--backup` / `--allow-no-backup` guards, pre-promotion `publication` TOCTOU re-checks, Windows `PermissionError` retries, `close_wal` before `ATTACH` and inside `read_snapshot` for non-empty WALs without `-shm`, month-batched `"1 M"` + retry TWS requests, `max(requested_through, source_end)` preservation, and required `--scid` with auto-detected `--floor`. |
+| **G7** | Extracted shared `sqlite_paths` / `unlink_sqlite` / `close_wal` (`spy_5m_snapshot.py`), `by_session` (`spy_5m_store.py`), and `identity` / `require_distinct` / `validate_window` / `copy_window` (`spy_5m_contiguous.py`); added unit & integration tests across `tests/test_spy_5m_sierra.py` (`5` tests) and `tests/test_spy_5m_extend.py` (`6` tests) and re-verified `data/spy_5m.sqlite3` + full `pytest`. |

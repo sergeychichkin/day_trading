@@ -19,6 +19,19 @@ slippage_floor = 0.01
 same_day_close = false
 next_session_open = false
 trailing_stop = true
+exit4 = true
+exit5 = true
+
+[exit3]
+max_holding_days = 9
+
+[exit4]
+lookback = 4
+atr_multiplier = 0.25
+
+[exit5]
+lookback = 4
+atr_multiplier = 0.25
 
 [chart]
 high_atr_multiplier = 0.25

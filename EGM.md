@@ -41,14 +41,10 @@ usage.
 
 ## SPY five-minute boundary
 
-SPY five-minute acquisition stages native regular-hours IBKR trade bars, then
-publishes only an uninterrupted range to a separate SQLite cache. A refresh
-extends the installed endpoint without crossing a gap. The local `/spy/5m`
-viewer reads that cache for price and session VWAP and the SPY daily snapshot
-for levels. Neither source is written by the chart server. The downloader uses
-no order endpoints. See [measured coverage](docs/spy-5m-coverage.md) for the
-distinction between the January 2000 probe and the published start.
+SPY five-minute acquisition has two paths:
+1. Forward TWS build/refresh (`qqq_viewer.spy_5m_contiguous`) stages native regular-hours IBKR trade bars and publishes only an uninterrupted range to `data/spy_5m.sqlite3`, advancing forward from the installed endpoint without crossing a gap.
+2. Backward Sierra + TWS extension (`qqq_viewer.spy_5m_extend` and `qqq_viewer.spy_5m_sierra`) reads consolidated US equities records from an external Sierra Chart `.scid` file, requires complete 1-minute RTH coverage and 5% price-basis parity against `data/spy_daily.json`, patches missing/incomplete pre-history sessions via TWS, copies the preserved TWS tail unchanged, and optionally backs up and atomically promotes the verified combined cache.
 
-The SPY Entry 1 backtest consumes the verified intraday cache and the Yahoo
-daily snapshot offline. It writes new standalone HTML reports and does not
-refresh either source. See the [backtest commands and strategy rules](README.md#spy-five-minute-entry-1-backtest).
+The local `/spy/5m` viewer reads that cache for price and cumulative session VWAP (computed from stored bar `wap` and volume) and the SPY daily snapshot for levels. Neither source is written by the chart server. Neither acquisition tool uses order endpoints. See [measured coverage](docs/spy-5m-coverage.md) for the January 2000 TWS probe, the TWS-only start, and the Sierra + TWS backward extension (`2008-05-05`–`2026-11-24`).
+
+The SPY Entry 1 backtest consumes the verified intraday cache and the Yahoo daily snapshot offline. It writes new standalone HTML reports and does not refresh either source. See the [backtest commands and strategy rules](README.md#spy-five-minute-entry-1-backtest).

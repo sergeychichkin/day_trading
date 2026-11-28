@@ -12,6 +12,7 @@ from .sessions import NEW_YORK, Session
 from .spy_5m_store import STEP, FiveMinuteBar, sessions
 
 ExitMode = Literal["same_day_close", "next_session_open", "trailing_stop"]
+StopSource = Literal[3, 4, 5]
 
 
 @dataclass(frozen=True)
@@ -32,12 +33,20 @@ class AccountSettings:
 
 
 @dataclass(frozen=True)
+class StopCandidate:
+    source: StopSource
+    trigger_time: int
+    price: float
+
+
+@dataclass(frozen=True)
 class StopAdjustment:
     candle_time: int
     effective_time: int
     old_stop: float
     new_stop: float
     prior_session_count: int
+    source: StopSource
 
 
 @dataclass(frozen=True)
@@ -81,8 +90,9 @@ class OpenPosition:
     active_stop: float
     high: Decimal
     low: Decimal
-    pending_stop: float | None = None
+    pending_stop: StopCandidate | None = None
     stop_adjustments: tuple[StopAdjustment, ...] = ()
+    active_stop_source: StopSource | None = None
 
     def observe(self, *prices: float | Decimal) -> None:
         values = [_decimal(price) for price in prices]
@@ -110,6 +120,7 @@ class Trade:
     mfe_r: float
     mae_r: float
     stop_adjustments: tuple[StopAdjustment, ...]
+    stop_source: StopSource | None = None
 
 
 @dataclass(frozen=True)
@@ -190,8 +201,9 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
                exit_mode: ExitMode, *, session_lower: float | None, next_open: tuple[int, float] | None = None,
                position: OpenPosition | None = None,
                prior_lowers: tuple[float | None, float | None] = (None, None),
-               previous_session_date: date | None = None,
-               next_bar_open: int | None = None, pending_entry: PendingEntry | None = None) -> DayResult:
+               next_bar_open: int | None = None, pending_entry: PendingEntry | None = None,
+               holding_day: int | None = None, exit3_enabled: bool = True, exit3_max_holding_days: int = 9,
+               opening_stop_candidates: tuple[StopCandidate, ...] = ()) -> DayResult:
     events: list[OrderEvent] = []
     if exit_mode not in {"same_day_close", "next_session_open", "trailing_stop"}:
         raise ValueError(f"Unknown SPY exit mode: {exit_mode}")
@@ -200,22 +212,21 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
     if exit_mode == "next_session_open" and next_open is None and pending_entry is None:
         return DayResult(None, events, "next_open_unavailable")
     if position is not None and exit_mode != "trailing_stop":
-        raise ValueError("Only Exit 3 carries an open position.")
+        raise ValueError("Only the managed-stop scenario carries an open position.")
 
     carried_trade = None
     first_signal_time = session.open_utc
     if position is not None:
         position = replace(position)
-        if previous_session_date is None:
-            prior_sessions = sessions(session.date - timedelta(days=14), session.date - timedelta(days=1))
-            previous_session_date = prior_sessions[-1].date if prior_sessions else None
-        entry_date = datetime.fromtimestamp(position.entry_time, NEW_YORK).date()
-        prior_session_count = 1 if entry_date == previous_session_date else 2
-        overnight_fill = datetime.fromtimestamp(position.signal_time, NEW_YORK).date() != entry_date
-        eligible = () if overnight_fill and prior_session_count == 1 else prior_lowers[:prior_session_count]
-        level = max((value for value in eligible if value is not None), default=None)
-        carried_trade = _advance(position, session, bars, atrs, 0, account, exit_mode,
-                                 next_open, next_bar_open, level, prior_session_count, events)
+        if holding_day is None:
+            entry_date = datetime.fromtimestamp(position.entry_time, NEW_YORK).date()
+            holding_day = len(sessions(entry_date, session.date))
+        level = None
+        if exit3_enabled and 3 <= holding_day <= exit3_max_holding_days:
+            level = max((value for value in prior_lowers if value is not None), default=None)
+        carried_trade = _advance(position, session, bars, atrs, 0, account, exit_mode, next_open, events,
+                                 level=level, last_exit3_day=holding_day == exit3_max_holding_days,
+                                 opening_stop_candidates=opening_stop_candidates)
         if carried_trade is None:
             return DayResult(None, events, position=position)
         first_signal_time = carried_trade.exit_time
@@ -229,7 +240,7 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
             events.append(pending_entry.event(pending_entry.expiry_time, "expired", "Buy stop expired without a fill"))
         elif overnight_position is not None:
             carried_trade = _advance(overnight_position, session, bars, atrs, fill_index, account, exit_mode,
-                                     next_open, next_bar_open, None, 0, events)
+                                     next_open, events)
             if carried_trade is None:
                 return DayResult(None, events, position=overnight_position)
             first_signal_time = carried_trade.exit_time
@@ -305,19 +316,39 @@ def replay_day(session: Session, bars: list[FiveMinuteBar], atrs: list[float | N
             return result(pending=order)
         if position is None:
             return result(reason="unaffordable_gap")
-        trade = _advance(position, session, bars, atrs, fill_index, account, exit_mode,
-                         next_open, next_bar_open, None, 0, events)
+        trade = _advance(position, session, bars, atrs, fill_index, account, exit_mode, next_open, events)
         return result(trade, open_position=position if trade is None else None)
     return result(reason="no_signal" if signal is None else "no_bear" if confirmed else "no_vwap_confirmation")
 
 
-def _advance(position, session, bars, atrs, offset, account, exit_mode, next_open,
-             next_bar_open, level, prior_session_count, events) -> Trade | None:
+def _apply_stop(position, time, candidates, events):
+    winner = max(candidates, key=lambda item: (item.price, -item.source), default=None)
+    if winner is None or winner.price <= position.active_stop:
+        return None
+    old_stop = position.active_stop
+    position.active_stop = winner.price
+    position.active_stop_source = winner.source
+    adjustment = StopAdjustment(winner.trigger_time, time, old_stop, winner.price,
+                                2 if winner.source == 3 else 0, winner.source)
+    position.stop_adjustments += (adjustment,)
+    events.append(OrderEvent(time, "stop_adjusted", f"Exit {winner.source} raised stop from {old_stop} to {winner.price}",
+                             position.entry_trigger, winner.price, position.shares, adjustment))
+    return winner.source
+
+
+def _advance(position, session, bars, atrs, offset, account, exit_mode, next_open, events, *,
+             level=None, last_exit3_day=False, opening_stop_candidates=()) -> Trade | None:
+    first_eligible = datetime.combine(session.date, time(9, 45), NEW_YORK).timestamp() if level is not None else None
+    queued = opening_stop_candidates
     for index in range(offset, len(bars)):
         bar = bars[index]
         if position.pending_stop is not None:
-            position.active_stop = position.pending_stop
+            queued += (position.pending_stop,)
             position.pending_stop = None
+        if queued:
+            if _apply_stop(position, bar.time, queued, events) == 3:
+                first_eligible = None
+            queued = ()
         stop = position.active_stop
         entry_bar = bar.time == position.entry_time
         intrabar_entry = entry_bar and bar.open < position.entry_trigger
@@ -329,23 +360,16 @@ def _advance(position, session, bars, atrs, offset, account, exit_mode, next_ope
                            gap_possible=not entry_bar, ambiguous=intrabar_entry and bar.close > stop)
         position.observe(bar.high, bar.close if intrabar_entry else bar.low)
         atr = atrs[index]
-        if (exit_mode == "trailing_stop" and level is not None and bar.close > bar.open
+        if (first_eligible is not None and bar.time >= first_eligible and bar.close > bar.open
                 and bar.high < level and atr is not None and math.isfinite(atr) and atr >= 0):
+            if last_exit3_day and bar.time + STEP >= session.close_utc:
+                continue
             tick = Fraction(str(account.tick_size))
             raw_stop = Fraction(str(bar.low)) - Fraction(str(atr)) / 2
             candidate = float((raw_stop // tick) * tick)
             if candidate > stop:
-                effective = bars[index + 1].time if index + 1 < len(bars) else next_bar_open
-                if effective is None:
-                    day = session.date
-                    following = sessions(day + timedelta(days=1), day + timedelta(days=14))
-                    effective = following[0].open_utc
-                position.pending_stop = candidate
-                adjustment = StopAdjustment(bar.time, effective, stop, candidate, prior_session_count)
-                position.stop_adjustments += (adjustment,)
-                events.append(OrderEvent(bar.time + STEP, "stop_adjusted",
-                                         f"Protective stop increase from {stop} to {candidate}",
-                                         position.entry_trigger, candidate, position.shares, adjustment))
+                position.pending_stop = StopCandidate(3, bar.time, candidate)
+                first_eligible = None
     if exit_mode == "trailing_stop" or (exit_mode == "next_session_open" and next_open is None):
         return None
     if exit_mode == "same_day_close":
@@ -366,7 +390,9 @@ def _finish(position, exit_time, exit_reference, account, events, reason, *,
     entry_raw = _decimal(position.entry_reference)
     position.observe(exit_raw, exit_price)
     risk = entry_price - _decimal(position.initial_stop)
-    events.append(OrderEvent(exit_time, "closed", reason, position.entry_trigger, stop, shares))
+    source = position.active_stop_source if reason == "protective_stop" else None
+    detail = (f"Exit {source}" if source is not None else "Initial SL") if reason == "protective_stop" else reason
+    events.append(OrderEvent(exit_time, "closed", detail, position.entry_trigger, stop, shares))
     return Trade(
         position.signal_time, position.bear_time, position.entry_time, exit_time, position.entry_trigger,
         position.initial_stop, float(entry_price), float(exit_price), shares,
@@ -374,5 +400,5 @@ def _finish(position, exit_time, exit_reference, account, events, reason, *,
         float((entry_price - entry_raw + exit_raw - exit_price) * shares),
         float((entry_raw - _decimal(position.entry_trigger) + exit_gap) * shares), reason, ambiguous,
         float((position.high - entry_price) / risk), float((entry_price - position.low) / risk),
-        position.stop_adjustments,
+        position.stop_adjustments, source,
     )

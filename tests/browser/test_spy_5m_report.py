@@ -224,7 +224,9 @@ def test_trade_log_sorts_numbers_text_dates_and_missing_values(page, replay_file
     write_report(output, data)
     page.goto(output.as_uri())
     log = page.locator("#trades")
-    assert log.locator("th").all_text_contents()[-4:] == ["Exit reason", "Commission", "Slippage", "Shares"]
+    headings = log.locator("th").all_text_contents()
+    assert headings[10:12] == ["Net P&L", "Exit reason"]
+    assert headings[-4:] == ["Chart", "Commission", "Slippage", "Shares"]
     expect(log.locator("th button")).to_have_count(20)
     expect(log.get_by_role("columnheader", name="Daily ATR20 / Close (%)").locator("button br")).to_have_count(1)
     sessions = log.locator("tbody td:first-child")
@@ -279,7 +281,7 @@ def test_trade_chart_shows_full_cached_window_outside_replay(page, replay_files,
     capture_price(page)
     page.goto(output.as_uri())
     page.locator("#scenario").select_option("next_session_open")
-    assert page.locator("#trades tbody td").all_text_contents()[11:15] == ["+1", "1.25", "0.50", "1.75%"]
+    assert page.locator("#trades tbody td").all_text_contents()[12:16] == ["+1", "1.25", "0.50", "1.75%"]
     prior, _ = sessions(date(2025, 11, 26), friday)
     for control, left, right in [("Show entry", prior, following[-2]), ("Show exit", sessions(friday, friday)[0], following[-1])]:
         page.get_by_role("button", name=control).click()
@@ -463,6 +465,7 @@ def test_report_uses_next_calendar_month_across_new_year(page, replay_files, tmp
 
 def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_path):
     from dataclasses import replace
+    from datetime import time
 
     from qqq_viewer.backtest_spy_5m import load_settings, run
     from qqq_viewer.spy_5m_report import write_report
@@ -472,17 +475,18 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     friday, monday = sessions(date(2025, 11, 28), date(2025, 12, 1))
     with store._connection(write=True) as db:
         db.execute("UPDATE bars SET low=99 WHERE time=?", (friday.open_utc,))
+        db.execute("UPDATE bars SET low=99 WHERE time=?", (monday.open_utc,))
         db.executemany("UPDATE bars SET open=?,high=?,low=?,close=? WHERE time=?", [
-            (99.6, 100.7, 99.5, 100.3, monday.open_utc),
-            (99.9, 100.8, 99.8, 100.6, monday.open_utc + 300),
-            (97, 105, 96, 104, monday.open_utc + 600),
-            (104, 105, 99, 101, monday.open_utc + 900),
-            (107, 108, 100, 107, monday.open_utc + 1200),
+            (99.9, 100.8, 99.8, 100.6, monday.open_utc + 900),
+            (97, 105, 96, 104, monday.open_utc + 1200),
+            (104, 105, 99, 101, monday.open_utc + 1500),
+            (107, 108, 100, 107, monday.open_utc + 1800),
         ])
     daily_data = json.loads(daily.read_bytes())
     daily_data["bars"][2].update(open=101, lower=100.9)
     daily.write_text(json.dumps(daily_data), encoding="utf-8")
     settings = replace(load_settings(config), trailing_stop=True, same_day_close=False, next_session_open=False)
+    settings = replace(settings, entry=replace(settings.entry, entry1_end_time=time(10, 0)))
     payload = run(settings, date(2025, 11, 26), monday.date)
     scenario, = payload["scenarios"]
     trade, = scenario["trades"]
@@ -499,19 +503,16 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     assert cells[1:3] == ["09:40", "09:50"]
     assert "Dec 1, 2025" in cells[5]
     assert cells[7:10] == ["3", f"{trade['mfe_r']:.2f}", f"{trade['mae_r']:.2f}"]
+    assert cells[11] == "Exit 3"
     expect(page.locator("#event-month")).to_contain_text("2025-11 through 2025-12")
-    rows = page.locator("#orders tbody tr").filter(has_text="Protective stop increase")
-    expect(rows).to_have_count(2)
-    for row, trigger, effective in (
-        (rows.nth(0), "09:30", "Dec 1, 2025, 09:35"),
-        (rows.nth(1), "09:35", "Dec 1, 2025, 09:40"),
-    ):
-        expect(row).to_contain_text(f"Triggering candle Dec 1, 2025, {trigger}")
-        expect(row).to_contain_text(f"Effective {effective}")
-        expect(row).to_contain_text("2025-11-28 100.9 (verified) / 2025-11-26 98 (verified)")
-        expect(row).not_to_contain_text("2025-11-25")
-        row.get_by_role("button", name="Show event").click()
-        expect(page.locator("#chart-legend")).to_contain_text(f"Dec 1, 2025, {trigger}")
+    row = page.locator("#orders tbody tr").filter(has_text="Exit 3 raised stop")
+    expect(row).to_have_count(1)
+    expect(row).to_contain_text("Triggering candle Dec 1, 2025, 09:45")
+    expect(row).to_contain_text("Effective Dec 1, 2025, 09:50")
+    expect(row).to_contain_text("2025-11-28 100.9 (verified) / 2025-11-26 98 (verified)")
+    expect(row).not_to_contain_text("2025-11-25")
+    row.get_by_role("button", name="Show event").press("Enter")
+    expect(page.locator("#chart-legend")).to_contain_text("Dec 1, 2025, 09:45")
     page.get_by_role("button", name="Show exit").click()
     expect(page.locator("#month")).to_have_value("2025-11")
     points = [{"time": trade["exit_time"], "value": trade["stop_adjustments"][-1]["new_stop"]}]
@@ -522,6 +523,44 @@ def test_report_exit3_stop_lines_log_and_open_position(page, replay_files, tmp_p
     expect(page.locator("#summary")).to_contain_text("Realized net P&L")
     expect(page.locator("#summary")).to_contain_text("Max closed-balance drawdown")
     expect(page.locator("#provenance")).to_contain_text('"fingerprinted_bars"')
+
+
+def test_report_sorts_stop_sources_and_marks_daily_raise_at_effective_open(page, replay_files, tmp_path):
+    from qqq_viewer.backtest_spy_5m import load_settings, run
+    from qqq_viewer.spy_5m_report import write_report
+
+    _, _, config = replay_files
+    payload = run(load_settings(config))
+    payload["settings"].update(trailing_stop=True, exit3_max_holding_days=2)
+    case = payload["scenarios"][0]
+    friday, monday = payload["months"]["2025-11"][-1], payload["months"]["2025-12"][0]
+    adjustment = {"candle_time": friday["close_utc"], "effective_time": monday["open_utc"],
+                  "old_stop": 98, "new_stop": 100.23, "prior_session_count": 0, "source": 4}
+    trade = case["trades"][1]
+    case["trades"] = [{**trade, "exit_reason": "protective_stop", "stop_source": source,
+                       "exit_time": monday["open_utc"], "exit_date": monday["date"],
+                       "stop_adjustments": [adjustment] if source == 4 else []}
+                      for source in (5, 3, None, 4)]
+    case["events"].append({"time": monday["open_utc"], "date": monday["date"], "action": "stop_adjusted",
+                           "detail": "Exit 4 raised stop from 98 to 100.23", "adjustment": adjustment,
+                           "trigger": None, "stop": 100.23, "shares": 100})
+    output = tmp_path / "shared-stop-reasons.html"
+    write_report(output, payload)
+    capture_price(page)
+    page.goto(output.as_uri())
+    expect(page.locator("#execution")).to_contain_text("Exit 3 has no eligible holding days")
+    page.locator("#month").select_option("2025-11")
+    log = page.locator("#trades")
+    reasons = log.locator("tbody td:nth-child(12)")
+    expect(reasons).to_have_text(["Exit 5", "Exit 3", "Initial SL", "Exit 4"])
+    log.get_by_role("button", name="Exit reason").press("Enter")
+    expect(reasons).to_have_text(["Exit 3", "Exit 4", "Exit 5", "Initial SL"])
+    row = page.locator("#orders tbody tr").filter(has_text="Exit 4 raised stop")
+    expect(row).to_have_count(1)
+    expect(row).to_contain_text("Triggering daily close Nov 28, 2025, 13:00")
+    expect(row).to_contain_text("Effective Dec 1, 2025, 09:30")
+    assert [(marker["time"], marker["text"]) for marker in page.evaluate("spyMarkers")
+            if marker["text"].startswith("Exit 4 stop")] == [(monday["open_utc"], "Exit 4 stop 100.23")]
 
 
 def test_report_labels_skips_as_new_entry_outcomes(page, replay_files, tmp_path):
