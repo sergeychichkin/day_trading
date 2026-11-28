@@ -111,7 +111,7 @@ For a custom snapshot, pass its path to both commands: `qqq_viewer.spy_daily --c
 
 ## Existing data and acquisition
 
-The QQQ one-minute SQLite history remains at `data/qqq.sqlite3`. Its existing maintenance command is `python -m qqq_viewer.backfill`. SPY five-minute history and the existing TWS and Sierra commands are documented in the [coverage record](docs/spy-5m-coverage.md). Preparing local inputs for additional symbols is a separate workflow.
+The QQQ one-minute SQLite history remains at `data/qqq.sqlite3`. Its maintenance command is `python -m qqq_viewer.backfill`. For SPY five-minute history and the existing TWS and Sierra commands, see the [SPY coverage record](docs/spy-5m-coverage.md). For the 23-ETF Yahoo and TWS collection, see the [download and audit workflow](docs/etf-history-acquisition.md).
 
 ## Verify
 

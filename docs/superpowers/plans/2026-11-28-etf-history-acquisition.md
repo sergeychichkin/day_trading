@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-28-etf-history-acquisition-design.md`
 
+Live QQQ probes returned complete native five-minute grids from twelve-month windows in both 2007 and 2026. The collector uses those windows first, then monthly and individual fallbacks for unresolved sessions. The default three TWS workers share a two-second minimum request-start spacing.
+
 ## Global constraints
 
 - Work on `main` in the current checkout. Preserve existing QQQ and SPY data, configs and reports. Write new data beneath `data/etf_history/<run-id>/`.
@@ -31,10 +33,10 @@
 
 - [ ] Add fixture tests for the exact roster, cutoff on a weekend or pre-close weekday, a later listing, duplicated or invalid Yahoo rows, a missing eligible session resetting indicators, and a restart after an archived response but before checkpoint. Assert output files are independent of existing SPY and QQQ paths.
 - [ ] Run the new test file before implementation and confirm the new entry points or assertions fail.
-- [ ] Define `python -m equity_backtest.acquire_history --run-dir <new-run-path> --port 7497 --volume-unit shares`. Support `--resume` on the same directory and optional `--through` for an earlier completed session; compare all frozen manifest parameters when resuming. Use the existing local TWS default port and expose it explicitly. Support separate daily, intraday and offline audit/publish stages under the same run manifest.
-- [ ] Archive immutable provider response records per request attempt with a stable request key, attempt number, parameter fingerprint, received rows, error metadata and hash. Use atomic file writes. A checkpoint is committed only after its evidence is durable. Resume reconciles records left by an interrupted checkpoint and reuses terminal request outcomes.
+- [x] Define `python -m equity_backtest.acquire_history --run-dir <new-run-path> --port 7497 --volume-unit shares`. Support `--resume` on the same directory and optional `--through` for an earlier completed session; compare all frozen manifest parameters when resuming. Use the existing local TWS default port and expose it explicitly. Support separate daily, intraday and offline audit/publish stages under the same run manifest.
+- [x] Archive immutable provider response records per request attempt with a stable request key, attempt number, parameter fingerprint, received rows, error metadata and hash. Use atomic file writes. A checkpoint is committed only after its evidence is durable. Resume reconciles records left by an interrupted checkpoint and reuses terminal request outcomes.
 - [ ] Generalize the existing daily indicator builder with a ticker input and reuse its formulas. Preserve the SPY downloader's entry point and behavior. Request each Yahoo symbol individually with explicit settings and an exclusive API end of cutoff plus one day. Retain corporate actions, adjusted close and unusable raw rows; emit symbol-identified canonical JSON and per-session daily status. Discover verified first-trading evidence where needed, recording the source and keeping unknown dates distinct.
-- [ ] Re-run the daily and archive tests plus the existing SPY daily tests.
+- [x] Re-run the daily and archive tests plus the existing SPY daily tests.
 
 ### Task 2. TWS acquisition and per-session verification
 
@@ -52,14 +54,14 @@
 
 - [ ] Add an end-to-end fixture with confirmed pre-listing dates, a daily gap, an internal intraday gap, a trailing empty session, an unresolved request, a broad price-basis discrepancy and at least two verified blocks. Assert exact UTC and New York missing-minute timestamps, disjoint session dispositions, separate daily counts and the latest block's exact published bounds. Test missing daily release inputs, a symbol with no verified block, and an interrupted release.
 - [ ] Run the audit fixture tests and observe the new checks fail before implementing them.
-- [ ] Generate `audit/symbols.csv`, `audit/sessions.csv`, `audit/missing_5m_bars.csv`, `audit/anomalies.csv` and `audit/verified_blocks.csv`. Key records by requested symbol, date and source or interval where applicable. Include expected slots and observed/canonical/verified distinctions, attempt or row identifiers, status reason and evidence. Record missing daily sessions in the session ledger. Attribute confirmed pre-listing periods only from recorded evidence.
-- [ ] Apply the existing common-factor open/close price-basis test to comparable sessions. Publish no block through a corroborated unresolved basis mismatch. Detect suspected split and distribution dates using provider actions and residuals, flag the evidence and keep prices intact. Enumerate all verified blocks and select the one with the latest end. Record every excluded session and the cutoff shortfall.
-- [ ] Stage `<run-dir>/replay/<TICKER>/` with `intraday.sqlite3`, `daily.json` and `config.toml`. Include the verified endpoints, ticker, conId and volume unit. Verify integrity and every intraday session from a read-only snapshot, and smoke-run the existing generic offline backtester. Publish the whole staged directory atomically after verification. Write manifest statuses and artifact hashes for published, withheld and empty outcomes.
-- [ ] Update acquisition, resume and replay instructions. Re-run audit, report and acquisition tests and the full suite. Confirm retained SPY and QQQ input hashes are unchanged.
+- [x] Generate `audit/symbols.csv`, `audit/sessions.csv`, `audit/missing_5m_bars.csv`, `audit/anomalies.csv` and `audit/verified_blocks.csv`. Key records by requested symbol, date and source or interval where applicable. Include expected slots and observed/canonical/verified distinctions, attempt or row identifiers, status reason and evidence. Record missing daily sessions in the session ledger. Attribute confirmed pre-listing periods only from recorded evidence.
+- [x] Apply the existing common-factor open/close price-basis test to comparable sessions. Publish no block through a corroborated unresolved basis mismatch. Detect suspected split and distribution dates using provider actions and residuals, flag the evidence and keep prices intact. Enumerate all verified blocks and select the one with the latest end. Record every excluded session and the cutoff shortfall.
+- [x] Stage `<run-dir>/replay/<TICKER>/` with `intraday.sqlite3`, `daily.json` and `config.toml`. Include the verified endpoints, ticker, conId and volume unit. Verify integrity and every intraday session from a read-only snapshot, and smoke-run the existing generic offline backtester. Publish the whole staged directory atomically after verification. Write manifest statuses and artifact hashes for published, withheld and empty outcomes.
+- [x] Update acquisition, resume and replay instructions. Re-run audit, report and acquisition tests and the full suite. Confirm retained SPY and QQQ input hashes are unchanged.
 
 ### Task 4. Live acquisition and reconciliation
 
-- [ ] Start the new run with the latest completed session cutoff. Check a bounded Yahoo and TWS sample including a liquid ETF and a newer ETF. Confirm the qualified contracts, observed fields, calendar alignment, returned timestamps, configured volume unit and pacing before releasing the full request queue.
+- [x] Start the new run with the latest completed session cutoff. Check a bounded Yahoo and TWS sample including a liquid ETF and a newer ETF. Confirm the qualified contracts, observed fields, calendar alignment, returned timestamps, configured volume unit and pacing before releasing the full request queue.
 - [ ] Run the complete Yahoo download and paced TWS acquisition, monitor progress, recover transient failures and resume the same run. Distinguish terminal provider evidence from request problems. Continue all work that can proceed for other symbols when an individual symbol is blocked.
 - [ ] Run the offline audit and publication stages. Independently reconcile expected dates, verified blocks and missing-bar totals for all 23 symbols. Check all staged bundle identities and endpoints through the generic runner. Compare retained input hashes again.
 - [ ] Write the dated coverage report with a row for every symbol, all published bounds and shortfalls, total daily and five-minute gaps, provider failures and direct links to detailed ledgers and configs. Run `git diff --check` and confirm every documented command and artifact path exists.

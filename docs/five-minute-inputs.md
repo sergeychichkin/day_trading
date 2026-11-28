@@ -24,4 +24,4 @@ The daily file uses `schema = "yahoo-daily-v1"`, `source = "Yahoo Finance"` and 
 
 ## Existing SPY acquisition tools
 
-The existing SPY daily, TWS and Sierra commands remain available. See the [SPY five-minute coverage record](spy-5m-coverage.md) for TWS and Sierra commands. Cache preparation for other symbols is a separate workflow.
+The existing SPY daily, TWS and Sierra commands remain available. See the [SPY five-minute coverage record](spy-5m-coverage.md) and the [23-ETF acquisition workflow](etf-history-acquisition.md).

@@ -59,7 +59,7 @@ def _normalize(frame: pd.DataFrame, expected: set[date]) -> dict[date, tuple]:
     return bars
 
 
-def _snapshot(dates: list[date], source: dict[date, tuple]) -> dict:
+def _snapshot(dates: list[date], source: dict[date, tuple], ticker: str = "SPY") -> dict:
     bars, missing = [], []
     highs, lows = deque(maxlen=10), deque(maxlen=10)
     volumes, seed = deque(maxlen=20), []
@@ -98,7 +98,7 @@ def _snapshot(dates: list[date], source: dict[date, tuple]) -> dict:
             "volume_sma_20": sum(volumes) / 20 if len(volumes) == 20 else None,
             "ema_20": ema, "ema_direction": direction, "upper": upper, "lower": lower,
         })
-    return {**DAILY_IDENTITY, "bars": bars, "missing_sessions": missing, "through": dates[-1].isoformat()}
+    return {**DAILY_IDENTITY, "ticker": ticker, "bars": bars, "missing_sessions": missing, "through": dates[-1].isoformat()}
 
 
 def _write_snapshot(path: Path, snapshot: dict) -> None:
