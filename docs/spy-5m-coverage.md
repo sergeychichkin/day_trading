@@ -33,15 +33,26 @@ on **December 23, 2013**. The monthly request plus a one-day retry provided
 **71 of 78** expected bars. Missing New York bar starts: **09:30, 09:35,
 09:40, 09:45, 09:50, 09:55, 10:00**.
 
-The next NYSE session, **December 24, 2013**, starts the published continuous
-range. The cache through **November 24, 2026** contains **3,249 sessions /
-252,450 bars** with no missing, unverified, or conflicting bars. The browser
-opened December 24 at 09:30 New York time with VWAP and both daily levels.
+The next NYSE session, **December 24, 2013**, starts the TWS-only continuous
+range (`3,249` sessions / `252,450` bars through **November 24, 2026**).
+
+## Extended uninterrupted range (Sierra Chart + TWS) — November 28, 2026
+
+Using Sierra Chart consolidated US equities 1-minute history (`C:\SierraChart\Data\SPY.scid`, starting **May 5, 2008**) plus TWS 1-day patches for Sierra’s 12 incomplete pre-December 24, 2013 sessions (`2009-09-04`, `2009-10-09`, `2010-01-08`, `2010-05-06`, `2010-07-26`, `2010-11-16`, `2010-12-31`, `2013-03-21`, `2013-05-24`, `2013-06-11`, `2013-06-20`, `2013-11-11`), the published uninterrupted cache in `data/spy_5m.sqlite3` was extended backward to **May 5, 2008**:
+
+- **Published uninterrupted range:** **May 5, 2008** through **November 24, 2026** — **4,670 sessions / 362,856 five-minute bars** with no missing, unverified, or conflicting bars.
+- **Source composition:** `1,409` sessions aggregated from Sierra 1-minute `.scid` records (`sierra-scid-1m`, prices rounded to 2 decimals, 5-minute `wap` computed from volume-weighted 1-minute typical prices `(H + L + C) / 3`), `12` gap sessions patched from TWS (`tws-1d-patch`), and `3,249` original TWS sessions preserved unchanged (`data/spy_5m_tws_2013_2026.sqlite3` retained as a pure-TWS backup).
 
 To reproduce the checks without TWS or a cache write:
 
 ```powershell
 .\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_contiguous --verify --through 2026-11-24
+```
+
+To re-run the Sierra + TWS extension from a pure-TWS cache:
+
+```powershell
+.\.venv\Scripts\python.exe -m qqq_viewer.spy_5m_extend --scid "C:\SierraChart\Data\SPY.scid" --floor 2008-05-05 --port 7497 --backup data/spy_5m_tws_2013_2026.sqlite3 --promote
 ```
 
 To rebuild from TWS with the same cutoff, use disposable output paths:
